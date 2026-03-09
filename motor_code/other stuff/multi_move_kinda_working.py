@@ -74,10 +74,11 @@ def evaluate_spline_norm(coeffs, tau, dt):
     return p, v, a
 
 # --- MAIN CONTROLLER ---
-def move_interp_accel_final(data):
-    segments_per_sec = 20  # 50ms segments
-    steps_per_segment = 10 # 5ms sim ticks
+def move_interp_accel_final(data, segments_per_sec, steps_per_segment):
+    # segments_per_sec = 20  # 50ms segments
+    # steps_per_segment = 10 # 5ms sim ticks
     dt = 1 / segments_per_sec 
+    sub_dt = dt / steps_per_segment
     
     p_data, v_data = data[:, 0:2], data[:, 2:4]
     total_sim_steps = (len(p_data) - 3) * steps_per_segment
@@ -104,13 +105,21 @@ def move_interp_accel_final(data):
         # 3. Inner Loop Simulation
         for step in range(1, steps_per_segment + 1):
             tau = step / steps_per_segment
+
+            # 1. Get the EXACT analytical position from the spline
             next_p, _, _ = evaluate_spline_norm(coeffs, tau, dt)
 
-            # Inverse Kinematics
+            # 2. Get the EXACT analytical lengths at this micro-tick
             next_lengths = np.linalg.norm(corner_positions - next_p, axis=1)
-            motor_history[idx] = next_lengths - curr_lengths
+            
+            # 3. Delta L is the difference from the PREVIOUS micro-tick
+            dl = next_lengths - curr_lengths
+            
+            # Store
             pos_history[idx + 1] = next_p
-
+            motor_history[idx] = dl
+            
+            # 4. Slide the window for the next micro-tick
             curr_lengths = next_lengths
             idx += 1
 
@@ -140,7 +149,7 @@ def generate_smooth_circle(center=(250, 250), radius=150, duration=5.0, dt=1/20)
     
     return np.column_stack((p_x, p_y, v_x, v_y))
 
-def smooth_data(data, window=20):
+def smooth_data(data, window=3):
     return np.convolve(data, np.ones(window)/window, mode='same')
 
 # Re-using your animation function
@@ -234,7 +243,7 @@ def animate_trajectory(pos_history, motor_history, time):
         return [effector, trace, vel_line] + cables + mot_lines
 
     ani = FuncAnimation(fig, update, frames=len(pos_history),
-                        init_func=init, blit=True, interval=2)
+                        init_func=init, blit=True, interval=time/ticks)
     # interval = time/ticks for real-time plotting
 
     plt.legend()
@@ -243,16 +252,16 @@ def animate_trajectory(pos_history, motor_history, time):
 
 
 # --- EXECUTION ---
-circle_data = generate_smooth_circle()
-pos_test, motor_test = move_interp_accel_final(circle_data)
+sim_duration = 5
+sim_steps_per_sec = 100
+
+circle_data = generate_smooth_circle(center=(250, 250), radius=175, duration=sim_duration, dt = 1/sim_steps_per_sec)
+pos_test, motor_test = move_interp_accel_final(circle_data, 120, 1)
 
 np.set_printoptions(threshold=np.inf, precision=6, suppress=True)
 # print(pos_test)
 
-time = 5
-
-
 
 # print(pos_test)
-animate_trajectory(pos_test, motor_test, time)
+animate_trajectory(pos_test, motor_test, sim_duration)
 # plot_static_trajectory(pos_test, motor_test, label='interpolated traj')
