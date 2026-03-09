@@ -50,9 +50,8 @@ def forward_kinematics(lengths):
     res = np.linalg.lstsq(A, b, rcond=None)
     return res[0]
 
-def compute_a1(p0, p1, p2, p3, v0, v1, v2, v3, a0, a3=0):
+def compute_a1(dt, p0, p1, p2, p3, v0, v1, v2, v3, a0, a3=0):
     # all of the above are 2-vectors
-    dt = 1/100 # why not
     dt2 = dt**2
 
     d1 = (20/dt2) * (p2 - 2*p1 + p0) - (2/dt)*(3*v2 + 4*v1 + 3*v0) + 3*a0
@@ -205,6 +204,117 @@ def move_interp_accel_test(data):
         
     return pos_history, motor_history
 
+def move_interp_accel_test2(data):
+    # Match your data: 20Hz updates, 100Hz simulation
+    segments_per_sec = 20 
+    steps_per_segment = 5
+    dt = 1 / segments_per_sec
+    sub_dt = dt / steps_per_segment
+    
+    p_data = data[:, 0:2]
+    v_data = data[:, 2:]
+
+    total_sim_steps = (len(p_data) - 3) * steps_per_segment
+    pos_history = np.zeros((total_sim_steps + 1, 2))
+    motor_history = np.zeros((total_sim_steps, 4))
+
+    # Initial state
+    curr_p, curr_v, curr_a = p_data[0], v_data[0], np.array([0.0, 0.0])
+    curr_lengths = np.linalg.norm(corner_positions - curr_p, axis=1)
+    pos_history[0] = curr_p
+    
+    idx = 0
+    for i in range(len(p_data) - 3):
+        p1, v1 = p_data[i+1], v_data[i+1]
+        p2, v2 = p_data[i+2], v_data[i+2]
+        p3, v3 = p_data[i+3], v_data[i+3]
+
+        a1 = compute_a1(dt, curr_p, p1, p2, p3, curr_v, v1, v2, v3, curr_a)
+        
+        # Get the 6 coefficients: [c0, c1, c2, c3, c4, c5]
+        coeffs = get_quintic_coeffs(curr_p, curr_v, curr_a, p1, v1, a1, dt)
+
+        for step in range(1, steps_per_segment + 1):
+            t = sub_dt * step
+            
+            # Use s_p, s_v, s_a (the anchor), NOT curr_p
+            next_p, blank1, blank2 = evaluate_spline(coeffs, t)
+            
+            # IK Logic
+            next_lengths = np.linalg.norm(corner_positions - next_p, axis=1)
+            dl = next_lengths - curr_lengths
+            
+            # Store
+            pos_history[idx + 1] = next_p
+            motor_history[idx] = dl
+            
+            # Update curr_lengths for the next dl, but NOT curr_p yet!
+            curr_lengths = next_lengths
+            idx += 1
+
+        # 3. THE HAND-OFF (Only happens once per 50ms segment)
+        # Use the analytical endpoint of the spline to start the next segment
+        curr_p, curr_v, curr_a = evaluate_spline(coeffs, dt)
+        
+    return pos_history, motor_history
+
+def move_interp_accel_test3(data):
+    segments_per_sec = 20 
+    steps_per_segment = 5
+    dt = 1 / segments_per_sec
+    sub_dt = dt / steps_per_segment
+    
+    p_data = data[:, 0:2]
+    v_data = data[:, 2:]
+
+    total_sim_steps = (len(p_data) - 3) * steps_per_segment
+    pos_history = np.zeros((total_sim_steps + 1, 2))
+    motor_history = np.zeros((total_sim_steps, 4))
+
+    # Initial state
+    curr_p, curr_v, curr_a = p_data[0], v_data[0], np.array([0.0, 0.0])
+    curr_lengths = np.linalg.norm(corner_positions - curr_p, axis=1)
+    pos_history[0] = curr_p
+    
+    idx = 0
+    
+    # ... setup code ...
+
+    for i in range(len(p_data) - 3):
+        p1, v1 = p_data[i+1], v_data[i+1]
+        p2, v2 = p_data[i+2], v_data[i+2]
+        p3, v3 = p_data[i+3], v_data[i+3]
+
+        # 1. PASS THE CORRECT DT TO COMPUTE_A1
+        # Update your compute_a1 signature to accept dt!
+        a1 = compute_a1(dt, curr_p, p1, p2, p3, curr_v, v1, v2, v3, curr_a)
+        print(a1)
+        
+        coeffs = get_quintic_coeffs(curr_p, curr_v, curr_a, p1, v1, a1, dt)
+        
+        # Use the ANCHOR for the whole segment
+        s_p, s_v, s_a = curr_p.copy(), curr_v.copy(), curr_a.copy()
+
+        for step in range(1, steps_per_segment + 1):
+            t = sub_dt * step
+            # PURE evaluation using the return from get_quintic_coeffs
+            next_p, next_v, next_a = evaluate_spline(coeffs, t)
+
+            # IK and Storage
+            next_lengths = np.linalg.norm(corner_positions - next_p, axis=1)
+            motor_history[idx] = next_lengths - curr_lengths
+            pos_history[idx + 1] = next_p
+            
+            curr_lengths = next_lengths
+            idx += 1
+
+        # 2. ANALYTICAL HANDOFF
+        # Use the evaluate_spline results at the last t (which is dt)
+        curr_p, curr_v, curr_a = evaluate_spline(coeffs, dt)
+    
+    return pos_history, motor_history
+
+
 # generates circular trajectory data for testing
 def generate_smooth_circle(center=(250, 250), radius=175, duration=5.0, dt=1/20):
     """
@@ -213,16 +323,19 @@ def generate_smooth_circle(center=(250, 250), radius=175, duration=5.0, dt=1/20)
     """
     num_steps = int(duration / dt)
     t = np.linspace(0, 1, num_steps)
+
+    n = 0.5 # num_rotations
     
     # 1. Generate a smooth 's' curve for theta (0 to 2*pi)
     # We use a quintic polynomial ramp: 10t^3 - 15t^4 + 6t^5
     # This ensures velocity and acceleration start/end at 0.
     s = 10*t**3 - 15*t**4 + 6*t**5
-    theta = s * (2 * np.pi)
+    # print(s)
+    theta = s * (2 * np.pi * n)
     
     # Derivative of s (for velocity calculation)
     ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / duration
-    dtheta_dt = ds_dt * (2 * np.pi)
+    dtheta_dt = ds_dt * (2 * np.pi * n)
     
     # 2. Map polar to Cartesian coordinates
     cx, cy = center
@@ -238,7 +351,6 @@ def generate_smooth_circle(center=(250, 250), radius=175, duration=5.0, dt=1/20)
     v_data = np.vstack((v_x, v_y)).T
     
     return np.hstack((p_data, v_data))
-
 
 
 def plot_static_trajectory(pos_history, motor_history, label=''):
@@ -407,10 +519,13 @@ def animate_trajectory(pos_history, motor_history, time, label=''):
 
 
 circle_data = generate_smooth_circle()
-pos_test, motor_test = move_interp_accel_test(circle_data)
+
+# print(circle_data)
+
+pos_test, motor_test = move_interp_accel_test3(circle_data)
 
 np.set_printoptions(threshold=np.inf, precision=6, suppress=True)
-print(pos_test)
+# print(pos_test)
 
 time = len(motor_test) / 1000
 
