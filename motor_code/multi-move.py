@@ -50,96 +50,196 @@ def forward_kinematics(lengths):
     res = np.linalg.lstsq(A, b, rcond=None)
     return res[0]
 
-def move_naive(start, end, time):
-    # move at constant MOTOR rate
-    # start, end are 2-vectors with start and end positions
-    ticks_per_sec = 100 # i guess, why not
-    total_ticks = int(time*ticks_per_sec)
+def compute_a1(p0, p1, p2, p3, v0, v1, v2, v3, a0, a3=0):
+    # all of the above are 2-vectors
+    dt = 1/100 # why not
+    dt2 = dt**2
 
-    lengths_start = np.linalg.norm(corner_positions - start, axis=1)
-    lengths_end = np.linalg.norm(corner_positions - end, axis=1)
-    dl = (lengths_end - lengths_start) / total_ticks
+    d1 = (20/dt2) * (p2 - 2*p1 + p0) - (2/dt)*(3*v2 + 4*v1 + 3*v0) + 3*a0
+    d2 = (20/dt2) * (p3 - 2*p2 + p1) - (2/dt)*(3*v3 + 4*v2 + 3*v1) + 3*a3
 
-    curr_lengths = lengths_start.copy()
-    pos_history = np.zeros((total_ticks + 1, 2))
-    pos_history[0] = start
+    a1 = (4 * d1 - d2) / 15
+    return a1
 
-    for i in range(total_ticks):
-        curr_lengths += dl
-        curr_pos = forward_kinematics(curr_lengths)
-        pos_history[i+1] = curr_pos
+def get_quintic_coeffs(p0, v0, a0, p1, v1, a1, T):
+    T2 = T**2
+    T3 = T**3
+    T4 = T**4
+    T5 = T**5
 
-    return pos_history
+    # These 'b' values represent the 'gap' between 
+    # the state at T (under constant accel) and the targets.
+    # This is standard Hermite interpolation math.
+    b_p = p1 - (p0 + v0*T + 0.5*a0*T2)
+    b_v = v1 - (v0 + a0*T)
+    b_a = a1 - a0
 
-def move_interp_noaccel(start, end, time):
-    # move at constant LINEAR rate (with interpolation)
-    # start, end are 2-vectors with start and end positions
-    ticks_per_sec = 100 # i guess, why not
-    total_ticks = int(time*ticks_per_sec)
+    # The 3x3 matrix inversion results:
+    c3 = (10/T3)*b_p  - (4/T2)*b_v  + (0.5/T)*b_a
+    c4 = (-15/T4)*b_p + (7/T3)*b_v  - (1/T2)*b_a
+    c5 = (6/T5)*b_p   - (3/T4)*b_v  + (0.5/T3)*b_a
 
-    vector = end - start
-    dx = vector / total_ticks # ideal linear motion per timestep
+    # Note: c2 is a0/2. When evaluating, 
+    # use p = c0 + c1*t + c2*t^2 + c3*t^3...
+    return [p0, v0, a0/2.0, c3, c4, c5]
 
-    pos_history = np.zeros((total_ticks + 1, 2))
-    pos_history[0] = start
-    curr_pos = start.copy()
-    curr_lengths = np.linalg.norm(corner_positions - curr_pos, axis=1)
+def evaluate_spline(coeffs, t):
+    """Calculates P, V, A at any time t using Forward Kinematics."""
+    c0, c1, c2, c3, c4, c5 = coeffs
+    p = c0 + c1*t + c2*t**2 + c3*t**3 + c4*t**4 + c5*t**5
+    v = c1 + 2*c2*t + 3*c3*t**2 + 4*c4*t**3 + 5*c5*t**4
+    a = 2*c2 + 6*c3*t + 12*c4*t**2 + 20*c5*t**3
+    return p, v, a
 
-    motor_history = np.zeros((total_ticks, 4))
+def move_interp_accel(data):
+    # data is given as nx4 vector. format is [px, py, vx, vy]
+    segments_per_sec = 20
+    steps_per_segment = 10
 
-    for i in range(total_ticks):
-        # calculate required next lengths
-        next_lengths = np.linalg.norm(corner_positions - (curr_pos + dx), axis=1)
-        dl = next_lengths - curr_lengths
+    dt = 1 / segments_per_sec # overall timestep
+    sub_dt = dt / steps_per_segment
+    
+    p_data = data[:, 0:2]
+    v_data = data[:, 2:]
 
-        curr_lengths = next_lengths 
+    # preallocate history
+    total_sim_steps = (len(p_data) - 3) * steps_per_segment
+    pos_history = np.zeros((total_sim_steps + 1, 2))
+    motor_history = np.zeros((total_sim_steps, 4))
 
-        # within the timestep, move at constant rate
-        curr_pos += dx
-        pos_history[i+1] = curr_pos
-        motor_history[i] = dl
+    # initial state
+    curr_p = p_data[0]
+    curr_v = v_data[0]
+    curr_a = np.array([0.0, 0.0])
+    curr_lengths = np.linalg.norm(corner_positions - curr_p, axis=1)
+    pos_history[0] = curr_p
+    
+    idx = 0
+    # step the simulation
+    for i in range(len(p_data) - 3):
+        # do lookahead
+        p1, v1 = p_data[i+1], v_data[i+1]
+        p2, v2 = p_data[i+2], v_data[i+2]
+        p3, v3 = p_data[i+3], v_data[i+3]
 
+        # calculate optimal a1 for both x, y
+        a1 = compute_a1(curr_p, p1, p2, p3, curr_v, v1, v2, v3, curr_a)
+
+        # generate spline coefficients
+        [c0, c1, c2, c3, c4, c5] = get_quintic_coeffs(curr_p, curr_v, curr_a, p1, v1, a1, dt)
+
+        # inner loop: forward kinematics
+        for step in range(0, steps_per_segment):
+            t = sub_dt * step
+
+            # evaluate spline at t
+            next_p = curr_p + curr_v*t + 0.5*curr_a*t**2 + c3*t**3 + c4*t**4 + c5*t**5
+
+            # inverse kinematics
+            next_lengths = np.linalg.norm(corner_positions - next_p, axis=1)
+            dl = next_lengths - curr_lengths
+
+            # write results
+            pos_history[idx + 1] = next_p
+            motor_history[idx] = dl
+
+            # update local loop state
+            curr_lengths = next_lengths
+            idx += 1
+
+        # set up for next outer loop iter
+        curr_p, curr_v, curr_a = next_p, v1, a1
+        
     return pos_history, motor_history
 
-def move_interp_accel(start, end, time):
-    # Higher tick rate recommended for high-speed quintic paths
-    ticks_per_sec = 200 
-    total_ticks = int(time * ticks_per_sec)
+def move_interp_accel_test(data):
+    segments_per_sec = 20 # 50ms segments
+    steps_per_segment = 10 # 5ms simulation ticks
+    dt = 1 / segments_per_sec 
+    sub_dt = dt / steps_per_segment
     
-    pos_history = np.zeros((total_ticks + 1, 2))
-    motor_history = np.zeros((total_ticks, 4))
+    p_data = data[:, 0:2]
+    v_data = data[:, 2:]
 
-    curr_pos = start.copy()
-    curr_lengths = np.linalg.norm(corner_positions - curr_pos, axis=1)
-    pos_history[0] = curr_pos
+    total_sim_steps = (len(p_data) - 3) * steps_per_segment
+    pos_history = np.zeros((total_sim_steps + 1, 2))
+    motor_history = np.zeros((total_sim_steps, 4))
+
+    curr_p, curr_v, curr_a = p_data[0], v_data[0], np.array([0.0, 0.0])
+    curr_lengths = np.linalg.norm(corner_positions - curr_p, axis=1)
+    pos_history[0] = curr_p
     
-    for i in range(total_ticks):
-        # normalized time t goes from 0.0 to 1.0
-        t = i / total_ticks
-        
-        # quintic Polynomial: s(t) = 10t^3 - 15t^4 + 6t^5
-        # this profile has zero velocity AND zero acceleration at t=0 and t=1
-        s = 10*t**3 - 15*t**4 + 6*t**5 
-        # the equation comes from solving s(1) = 1 
-        # and s(0) = s'(0) = s''(0) = s'(1) = s''(1) = 0
-        # 6 dof equation, hence 5th degree polynomial is needed
-        
-        # 1. Calculate Cartesian Positions
-        next_pos = start + s * (end - start)
-        
-        # 2. Inverse Kinematics: Calculate Absolute Cable Lengths
-        next_lengths = np.linalg.norm(corner_positions - next_pos, axis=1)
-        dl = next_lengths - curr_lengths
+    idx = 0
+    for i in range(len(p_data) - 3):
+        p1, v1 = p_data[i+1], v_data[i+1]
+        p2, v2 = p_data[i+2], v_data[i+2]
+        p3, v3 = p_data[i+3], v_data[i+3]
 
-        # 3. Store Results
-        pos_history[i+1] = next_pos
-        motor_history[i] = dl
+        a1 = compute_a1(curr_p, p1, p2, p3, curr_v, v1, v2, v3, curr_a)
+        [c0, c1, c2, c3, c4, c5] = get_quintic_coeffs(curr_p, curr_v, curr_a, p1, v1, a1, dt)
 
-        # 4. Set up for next loop
-        curr_pos = next_pos
-        curr_lengths = next_lengths
+        # ANCHOR: We keep the starting p, v, a fixed for the inner loop
+        start_p, start_v, start_a = curr_p.copy(), curr_v.copy(), curr_a.copy()
+
+        # Step from 1 to 10 so we evaluate the END of each micro-step
+        for step in range(1, steps_per_segment + 1):
+            t = sub_dt * step
+
+            # Use the ANCHORS (start_p, etc) so t is relative to segment start
+            next_p = start_p + start_v*t + 0.5*start_a*t**2 + c3*t**3 + c4*t**4 + c5*t**5
+
+            next_lengths = np.linalg.norm(corner_positions - next_p, axis=1)
+            dl = next_lengths - curr_lengths
+
+            pos_history[idx + 1] = next_p
+            motor_history[idx] = dl
+
+            curr_lengths = next_lengths
+            idx += 1
+
+        # HAND-OFF: Calculate final velocity/accel at t=dt for the next segment
+        # This is where we ensure the "green bars" in your plot disappear
+        curr_p = next_p # This is now exactly at t=dt
+        curr_v = start_v + start_a*dt + 3*c3*dt**2 + 4*c4*dt**3 + 5*c5*dt**4
+        curr_a = start_a + 6*c3*dt + 12*c4*dt**2 + 20*c5*dt**3
         
     return pos_history, motor_history
+
+# generates circular trajectory data for testing
+def generate_smooth_circle(center=(250, 250), radius=175, duration=5.0, dt=1/20):
+    """
+    Generates P and V data for a circular path with smooth 
+    acceleration and deceleration ramps.
+    """
+    num_steps = int(duration / dt)
+    t = np.linspace(0, 1, num_steps)
+    
+    # 1. Generate a smooth 's' curve for theta (0 to 2*pi)
+    # We use a quintic polynomial ramp: 10t^3 - 15t^4 + 6t^5
+    # This ensures velocity and acceleration start/end at 0.
+    s = 10*t**3 - 15*t**4 + 6*t**5
+    theta = s * (2 * np.pi)
+    
+    # Derivative of s (for velocity calculation)
+    ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / duration
+    dtheta_dt = ds_dt * (2 * np.pi)
+    
+    # 2. Map polar to Cartesian coordinates
+    cx, cy = center
+    p_x = cx + radius * np.cos(theta)
+    p_y = cy + radius * np.sin(theta)
+    
+    # 3. Calculate Velocities (Chain Rule: dx/dt = dx/dtheta * dtheta/dt)
+    v_x = -radius * np.sin(theta) * dtheta_dt
+    v_y =  radius * np.cos(theta) * dtheta_dt
+    
+    # Format into the arrays your controller expects
+    p_data = np.vstack((p_x, p_y)).T
+    v_data = np.vstack((v_x, v_y)).T
+    
+    return np.hstack((p_data, v_data))
+
+
 
 def plot_static_trajectory(pos_history, motor_history, label=''):
     
@@ -284,26 +384,36 @@ def animate_trajectory(pos_history, motor_history, time, label=''):
         return [effector, trace, vel_line] + cables + mot_lines
 
     ani = FuncAnimation(fig, update, frames=len(pos_history),
-                        init_func=init, blit=True, interval=20)
+                        init_func=init, blit=True, interval=2)
     # interval = time/ticks for real-time plotting
 
     plt.legend()
     plt.show()
 
-startx = 50
-starty = 150
-endx = 400
-endy = 475
+# startx = 50
+# starty = 150
+# endx = 400
+# endy = 475
 
-start_pos = np.array([startx, starty], dtype=float)
-end_pos = np.array([endx, endy], dtype=float)
-time = 0.25
+# start_pos = np.array([startx, starty], dtype=float)
+# end_pos = np.array([endx, endy], dtype=float)
+# time = 0.25
 
-# pos_test, motor_test = move_interp_noaccel(start_pos, end_pos, 1)
+# # pos_test, motor_test = move_interp_noaccel(start_pos, end_pos, 1)
 
-pos_test, motor_test = move_interp_accel(start_pos, end_pos, time)
+# pos_test, motor_test = move_interp_accel(start_pos, end_pos, time)
 
 # print(motor_test)
+
+
+circle_data = generate_smooth_circle()
+pos_test, motor_test = move_interp_accel_test(circle_data)
+
+np.set_printoptions(threshold=np.inf, precision=6, suppress=True)
+print(pos_test)
+
+time = len(motor_test) / 1000
+
 
 # print(pos_test)
 animate_trajectory(pos_test, motor_test, time, label='interpolated traj')
