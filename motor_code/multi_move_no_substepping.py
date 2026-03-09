@@ -11,6 +11,19 @@ corner_positions = np.array([
     [height, width] # top right
 ])
 
+# forward kinematics
+def forward_kinematics(lengths):
+    x0, y0 = corner_positions[0]
+    l0 = lengths[0]
+    A, b = [], []
+    for i in [1, 2, 3]:
+        xi, yi = corner_positions[i]
+        li = lengths[i]
+        A.append([2*(xi - x0), 2*(yi - y0)])
+        b.append((l0**2 - li**2) + (xi**2 - x0**2) + (yi**2 - y0**2))
+    res = np.linalg.lstsq(np.array(A), np.array(b), rcond=None)
+    return res[0]
+
 # trajectory computation (splines)
 def compute_a1(p0, p1, p2, p3, v0, v1, v2, v3, a0, dt):
     """Calculates the target acceleration at the next waypoint for C2 continuity."""
@@ -133,6 +146,21 @@ def generate_smooth_circle(center=(250, 250), radius=150, duration=5.0, dt=1/20)
     
     return np.column_stack((p_x, p_y, v_x, v_y))
 
+def compute_path_from_motor(start, motor_history):
+    # start pos is x, y vector
+    curr_pos = start.copy()
+    curr_lengths = np.linalg.norm(corner_positions - curr_pos, axis=1)
+
+    # write data
+    pos_history = np.zeros((len(motor_history) + 1, 2))
+    pos_history[0] = curr_pos
+
+    for i in range(len(motor_history)):
+        curr_lengths += motor_history[i]
+        curr_position = forward_kinematics(curr_lengths)
+        pos_history[i+1] = curr_position
+
+    return pos_history
 
 # auxiliary
 def smooth_data(data, window=3):
@@ -231,18 +259,70 @@ def animate_trajectory(pos_history, motor_history, time, smoothing=False):
         return [effector, trace, vel_line] + cables + mot_lines
 
     ani = FuncAnimation(fig, update, frames=len(pos_history),
-                        init_func=init, blit=True, interval= time/ticks)
+                        init_func=init, blit=True, interval=30) #time/ticks)
 
     plt.legend()
     plt.show()
+
+def draw_line(start_pos, end_pos, start_v_vec, end_v_vec, duration, dt=1/20):
+    dist = np.linalg.norm(end_pos - start_pos)
+    if dist < 1e-6: return np.array([[start_pos[0], start_pos[1], 0, 0]])
+    
+    unit_dir = (end_pos - start_pos) / dist
+    
+    # project 2D velocity vectors onto the 1D line path
+    v0_s = np.dot(start_v_vec, unit_dir)
+    v1_s = np.dot(end_v_vec, unit_dir)
+    
+    # reuse your existing solver for 1D scalar 's'
+    # assume start/end acceleration is 0 for the segment
+    # arguments here are scalars because we are doing a line segment
+    coeffs_s = get_quintic_coeffs_norm(0, v0_s, 0, dist, v1_s, 0, duration)
+    
+    num_steps = int(duration / dt)
+    t_ticks = np.linspace(0, duration, num_steps)
+    
+    # vectorized evaluation using your existing evaluate_spline logic
+    # assuming evaluate_spline returns p, v, a
+    s_path = np.array([evaluate_spline_norm(coeffs_s, t) for t in t_ticks])
+    s = s_path[:, 0]
+    ds_dt = s_path[:, 1]
+    
+    # 4. Map back to 2D Cartesian
+    px = start_pos[0] + s * unit_dir[0]
+    py = start_pos[1] + s * unit_dir[1]
+    vx = ds_dt * unit_dir[0]
+    vy = ds_dt * unit_dir[1]
+    
+    return np.column_stack((px, py, vx, vy))
+
+def draw_arc(center, start_pos, radians, start_v, end_v, dt):
+    ## TODO
+    return None
 
 
 # run the thing
 sim_duration = 5
 sim_steps_per_sec = 100
+dt = 1 / sim_steps_per_sec
 
-circle_data = generate_smooth_circle(center=(250, 250), radius=175, duration=sim_duration, dt = 1/sim_steps_per_sec)
-pos_test, motor_test = move_interp_accel_final(circle_data, 120)
+# circle_data = generate_smooth_circle(center=(250, 250), 
+#                 radius=175, duration=sim_duration, dt = 1/sim_steps_per_sec)
+# pos_test, motor_test = move_interp_accel_final(circle_data, 120)
+
+start_pos = np.array([100, 150])
+end_pos = np.array([450, 400])
+start_v = np.array([0, 0])
+end_v = np.array([0, 0])
+
+line_data = draw_line(start_pos, end_pos, start_v, end_v, sim_duration, dt)
+
+pos_test, motor_test = move_interp_accel_final(line_data, sim_steps_per_sec)
+
+
+kinematics = compute_path_from_motor(pos_test[0], motor_test)
 
 np.set_printoptions(threshold=np.inf, precision=6, suppress=True) # isnt really necessary
-animate_trajectory(pos_test, motor_test, sim_duration, smoothing=False)
+# animate_trajectory(pos_test, motor_test, sim_duration, smoothing=False)
+
+animate_trajectory(kinematics, motor_test, sim_duration, smoothing=False)
