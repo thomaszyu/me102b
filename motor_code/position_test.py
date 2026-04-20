@@ -26,11 +26,11 @@ async def check2(id):
     c = moteus.Controller(id=id)
     state = await c.set_position(
         position=np.nan,          # Ignore position tracking
-        velocity=0.0,            # No velocity goal/limit interference
-        feedforward_torque= -0.3*MOTOR_SIGN[id], # Negative for retract, Positive for extend
-        maximum_torque=10,       # Safety cap
+        velocity=np.nan,            # No velocity goal/limit interference
+        feedforward_torque= 0.3, # Negative for retract, Positive for extend
+        maximum_torque=0.5,       # Safety cap
         watchdog_timeout=np.nan   # Keeps it moving without constant packets
     )
-    print(state)
+    await asyncio.sleep(0.5)
 
-asyncio.run(check2(3))
+asyncio.run(check2(1))

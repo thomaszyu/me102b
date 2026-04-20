@@ -35,16 +35,16 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
             for id in id_list:
                 if (target_id == id):
                     tasks.append(motors[id].set_position(
-                        position=np.nan,          # Ignore position tracking
-                        velocity=-2*MOTOR_SIGN[target_id],
+                        velocity=-0.1*MOTOR_SIGN[target_id],
                         maximum_torque=0.3,       # Safety cap
                         watchdog_timeout=np.nan,
                         query=True
                     ))
                 else:
                     tasks.append(motors[id].set_position(
-                        feedforward_torque=-0.01 * MOTOR_SIGN[id],
-                        maximum_torque=0.3,       # Safety cap
+                        kp_scale = 0.0,
+                        feedforward_torque= 0.02, # for some reason pos is always retract
+                        maximum_torque=0.05,       # Safety cap
                         watchdog_timeout=np.nan
                     ))
         
@@ -62,6 +62,7 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                     flag = True
                     continue
                 if flag == True:
+                    print(f"Motor {target_id} homed.")
                     return await motors[target_id].set_stop(query=True)
             else: flag = False
 
@@ -92,61 +93,41 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
     async def move_together_all():
         flag = False
         counter = 0
+        ids = [1, 2, 3, 4]
 
         while True:
+            tasks = []
+
+            for id in ids:
+                tasks.append(
+                    motors[id].set_position(
+                        position=MOTOR_SIGN[id]*length/2,
+                        velocity=np.nan,
+                        accel_limit=1,
+                        maximum_torque=0.6,
+                        watchdog_timeout=np.nan,
+                        query=True
+                    )
+                )
             # commands are sent nearly instantly one after another
-            states = await asyncio.gather(
-                motors[1].set_position(
-                    position=MOTOR_SIGN[1]*length/2,
-                    velocity=np.nan,
-                    accel_limit=1,
-                    maximum_torque=0.2,
-                    watchdog_timeout=np.nan,
-                    query=True
-                ),        
-                motors[2].set_position(
-                    position=MOTOR_SIGN[2]*length/2,
-                    velocity=np.nan,
-                    accel_limit=1,
-                    maximum_torque=0.2,
-                    watchdog_timeout=np.nan,
-                    query=True
-                ),           
-                motors[3].set_position(
-                    position=MOTOR_SIGN[3]*length/2,
-                    velocity=np.nan,
-                    accel_limit=1,
-                    maximum_torque=0.2,
-                    watchdog_timeout=np.nan,
-                    query=True
-                ),
-                motors[4].set_position(
-                    position=MOTOR_SIGN[4]*length/2,
-                    velocity=np.nan,
-                    accel_limit=1,
-                    maximum_torque=0.2,
-                    watchdog_timeout=np.nan,
-                    query=True
-                )      
-            )
+            states = await asyncio.gather(*tasks)
             await asyncio.sleep(0.1)
 
             vel1 = states[0].values[moteus.Register.VELOCITY]
             vel2 = states[1].values[moteus.Register.VELOCITY]
             vel3 = states[2].values[moteus.Register.VELOCITY]
             vel4 = states[2].values[moteus.Register.VELOCITY]
-            # print(vel1, vel3)
 
             counter += 1
             
-            if abs(vel1) < 0.05 and abs(vel2) < 0.05 and abs(vel3) < 0.05 and abs(vel4) < 0.05 and (counter >= 10):
+            if abs(vel1) < 0.05 and abs(vel2) < 0.05 and abs(vel3) < 0.05 and abs(vel4) < 0.05 and (counter >= 30):
                 if flag == True: return
                 else: 
                     flag = True
                     continue
             else: flag = False
 
-    await move_together_all()
+    # await move_together_all()
 
 
     print(f"Calibration Complete: {calibration_data}")
