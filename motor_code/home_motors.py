@@ -15,7 +15,7 @@ MOTOR_TORQUE_SCALE = {
     1: 1,
     2: 1,
     3: 1,
-    4: 8,
+    4: -1,
 }
 
 async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
@@ -43,9 +43,9 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                 if (target_id == id):
                     tasks.append(motors[id].set_position(
                         position=np.nan,
-                        kd_scale=1.0*MOTOR_TORQUE_SCALE[target_id],
+                        kd_scale=1.0,
                         velocity=-0.75*MOTOR_SIGN[target_id],
-                        maximum_torque=0.75 * MOTOR_TORQUE_SCALE[target_id],
+                        maximum_torque=0.75,
                         watchdog_timeout=np.nan,
                         query=True
                     ))
@@ -54,8 +54,8 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                         position=np.nan,
                         kp_scale = 0.0,
                         kd_scale = 0.0,
-                        feedforward_torque= 0.05 * max(1.0, MOTOR_TORQUE_SCALE[id]/2),
-                        maximum_torque=0.1 * MOTOR_TORQUE_SCALE[id],
+                        feedforward_torque= 0.05*MOTOR_TORQUE_SCALE[id],
+                        maximum_torque=0.1,
                         watchdog_timeout=np.nan,
                         query=True
                     ))
@@ -76,7 +76,7 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                 continue
 
             # Only exit if we are actually stalled after moving
-            if abs(vel) < 0.02:
+            if abs(vel) < 0.04:
                 if flag == False:
                     flag = True
                     continue
@@ -88,7 +88,7 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                         kp_scale=0.0,
                         kd_scale=0.0,
                         feedforward_torque=0.05 * MOTOR_TORQUE_SCALE[target_id],
-                        maximum_torque=0.1 * MOTOR_TORQUE_SCALE[target_id],
+                        maximum_torque=0.1,
                         watchdog_timeout=np.nan,
                         query=True
                     )
@@ -100,8 +100,8 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
             position=np.nan,
             kp_scale=0.0,
             kd_scale=0.0,
-            feedforward_torque=0.03 * MOTOR_TORQUE_SCALE[id],
-            maximum_torque=0.1 * MOTOR_TORQUE_SCALE[id],
+            feedforward_torque=0.05 * MOTOR_TORQUE_SCALE[id],
+            maximum_torque=0.1,
             watchdog_timeout=np.nan,
             query=True
         )
