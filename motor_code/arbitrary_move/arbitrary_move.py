@@ -17,28 +17,24 @@ def plan_trajectory(start_enc: np.ndarray,
                     duration:  float,
                     dt:        float = TICK_RATE) -> list[dict]:
     """
-    Plan a straight-line Cartesian move and return tick-by-tick motor commands,
-    all in encoder revolutions — no mm in the output.
+    plan a straight-line cartesian move and return tick-by-tick motor commands
+    all in encoder revolutions — no mm in the output
  
-    Strategy
-    --------
-    1. Plan a quintic spline in XY space (straight line, zero boundary vel/acc).
-    2. Sample the spline at every tick to get XY position and velocity.
-    3. Convert XY → encoder position via xy_to_enc (inverse kinematics).
-       Convert XY velocity → encoder velocity via the cable Jacobian.
-    4. Apply an offset so the planned delta matches where the motor *actually*
-       is right now (start_enc), rather than the geometric start of the spline.
+    strategy
+    1. Plan a quintic spline in xy space (straight line, zero boundary velocity, acceleration)
+    2. sample the spline at every tick to get XY position and velocity
+    3. convert xy to encoder position via xy_to_enc (inverse kinematics)
+       convert xy velocity to encoder velocity via cable Jacobian (see kinematics_utils)
+    4. apply an offset so the planned delta matches the actual motor position (start_enc)
+       rather than the geometric start of the spline.
  
-    Parameters
-    ----------
+    parameters
     start_enc : (4,) current encoder readings in revolutions (from moteus)
     end_xy    : (2,) target puck position in mm
     duration  : seconds to complete the move
     dt        : control tick period in seconds
  
-    Returns
-    -------
-    ticks : list of dicts, one per tick, each with:
+    returns ticks : list of dicts, one per tick, each with:
         'target_enc'  : (4,) absolute encoder target (rev) to pass to set_position
         'feedfwd_vel' : (4,) encoder velocity feedforward (rev/s)
     """
@@ -69,7 +65,6 @@ def plan_trajectory(start_enc: np.ndarray,
     # step 4. offset so planned deltas are rooted at the actual encoder reading
     # enc_path[0] is the geometric start; start_enc is where the motor actually is
     # any discrepancy (slack, slip, prior error) is absorbed here once
-
     enc_offset = start_enc - enc_path[0]   # (4,) rev
  
     ticks = [
@@ -86,33 +81,28 @@ def plan_trajectory(start_enc: np.ndarray,
 # high-level API
 async def move_to(motors:      dict,
                   end_xy:      np.ndarray,
-                  duration:    float,
-                  max_torque:  float = 0.6,
-                  accel_limit: float = 2.0) -> np.ndarray:
+                  duration:    float) -> np.ndarray:
     """
-    Move the end-effector to end_xy (mm) over duration seconds.
+    move the end-effector to end_xy (mm) over duration seconds
  
-    Reads live encoder positions at call time — no external state tracking
-    required between moves. Chain moves freely by calling move_to repeatedly.
+    reads live encoder positions at call time. no external state tracking
+    required between moves. we can call move_to repeatedly.
  
-    Parameters
-    ----------
-    motors      : dict {1..4 : moteus.Controller} from initialize_and_calibrate()
+    parameters
+    motors      : dict {1..4 : moteus.Controller} (from initialize_and_calibrate())
     end_xy      : (2,) target puck position in mm
     duration    : seconds to complete the move
     max_torque  : maximum motor torque in Nm
     accel_limit : motor acceleration limit in rev/s²
  
-    Returns
-    -------
-    final_enc : (4,) actual encoder readings at end of move (rev)
+    returns final_enc : (4,) actual encoder readings at end of move (rev)
     """
     start_enc = await read_encoders(motors)
     start_xy  = enc_to_xy(start_enc)
     print(f"Move: {np.round(start_xy, 1)} → {np.round(end_xy, 1)}  ({duration:.2f}s)")
  
     ticks     = plan_trajectory(start_enc, end_xy, duration)
-    final_enc = await execute_move(motors, ticks, max_torque, accel_limit)
+    final_enc = await execute_move(motors, ticks, MAX_TORQUE, ACCEL_LIMIT)
  
     actual_xy = enc_to_xy(final_enc)
     error_mm  = np.linalg.norm(actual_xy - end_xy)
