@@ -114,35 +114,39 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                 tasks.append(hold_tension(id))
         await asyncio.gather(*tasks)
 
-    # Motor 4: Wind back, set 0, record Motor 2
-    await stall_and_record(4)
-    await motors[4].set_rezero(0.0)
-    await hold_all_except(4)
-    m2_start = (await hold_tension(2)).values[moteus.Register.POSITION]
-    await asyncio.sleep(0.1)
+    async def home_sequence():
+        """Home all motors (4->2->1->3) and return cable length."""
+        # Motor 4: Wind back, set 0, record Motor 2
+        await stall_and_record(4)
+        await motors[4].set_rezero(0.0)
+        await hold_all_except(4)
+        m2_start = (await hold_tension(2)).values[moteus.Register.POSITION]
+        await asyncio.sleep(0.1)
 
-    # Motor 2: Wind back, record displacement
-    m2_end = (await stall_and_record(2)).values[moteus.Register.POSITION]
-    length = abs(m2_start - m2_end)
-    await motors[2].set_rezero(0.0)
-    await hold_all_except(2)
-    await asyncio.sleep(0.1)
+        # Motor 2: Wind back, record displacement
+        m2_end = (await stall_and_record(2)).values[moteus.Register.POSITION]
+        cable_length = abs(m2_start - m2_end)
+        await motors[2].set_rezero(0.0)
+        await hold_all_except(2)
+        await asyncio.sleep(0.1)
 
-    # Motor 1: Wind back, set 0, record Motor 3
-    await stall_and_record(1)
-    await motors[1].set_rezero(0.0)
-    await hold_all_except(1)
-    m3_start = (await hold_tension(3)).values[moteus.Register.POSITION]
-    await asyncio.sleep(0.1)
+        # Motor 1: Wind back, set 0, record Motor 3
+        await stall_and_record(1)
+        await motors[1].set_rezero(0.0)
+        await hold_all_except(1)
+        await asyncio.sleep(0.1)
 
-    # Motor 3: Wind back, set 0
-    await stall_and_record(3)
-    await motors[3].set_rezero(0.0)
-    await hold_all_except(3)
-    calibration_data['m1_max'] = (await hold_tension(1)).values[moteus.Register.POSITION]
+        # Motor 3: Wind back, set 0
+        await stall_and_record(3)
+        await motors[3].set_rezero(0.0)
+        await hold_all_except(3)
+        await asyncio.sleep(0.1)
 
-    # move all motors to middle position simultaneously
-    async def move_together_all():
+        print(f"Homing complete, cable length={cable_length:.3f}")
+        return cable_length
+
+    async def move_together_all(length):
+        """Move all motors to middle position simultaneously."""
         flag = False
         counter = 0
         ids = [1, 2, 3, 4]
@@ -161,7 +165,6 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                         query=True
                     )
                 )
-            # commands are sent nearly instantly one after another
             states = await asyncio.gather(*tasks)
             await asyncio.sleep(0.1)
 
@@ -171,18 +174,26 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
             vel4 = states[3].values[moteus.Register.VELOCITY]
 
             counter += 1
-            
+
             if abs(vel1) < 0.05 and abs(vel2) < 0.05 and abs(vel3) < 0.05 and abs(vel4) < 0.05 and (counter >= 30):
-                if flag == True: return
-                else: 
+                if flag == True:
+                    print("Moved to middle")
+                    return
+                else:
                     flag = True
                     continue
             else: flag = False
 
-    # await move_together_all()
+    # First home
+    length = await home_sequence()
 
+    # Move to middle
+    await move_together_all(length)
 
-    print(f"Calibration Complete: {calibration_data}")
+    # Second home (more accurate since starting from center)
+    length = await home_sequence()
+
+    print(f"Calibration Complete: cable_length={length:.3f}")
     return motors, calibration_data
 
 
