@@ -15,7 +15,7 @@ MOTOR_TORQUE_SCALE = {
     1: 1,
     2: 1,
     3: 1,
-    4: -1,
+    4: -2,
 }
 
 async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
