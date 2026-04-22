@@ -29,10 +29,10 @@ CORNERS = np.array([CORNER_POSITIONS[i] for i in [1, 2, 3, 4]])
 SIGNS = np.array([MOTOR_SIGN[i] for i in [1, 2, 3, 4]])
 
 SPOOL_DIAM_MM = 75.0
-SPOOL_CIRC_MM = 308.2
+SPOOL_CIRC_MM = 308.2 #tuned
 TICK_RATE = 0.05 # sec
 
 ACCEL_LIMIT = 5.0 # rev/s^2
-MAX_TORQUE = 1.5 # N m
+MAX_TORQUE = 2.5 # N m
 TENSION_BIAS_REV = 0.015 # rev bias to maintain tension lmao ajdkjhasbdkjashdba
 TENSION_TORQUE = 0.05

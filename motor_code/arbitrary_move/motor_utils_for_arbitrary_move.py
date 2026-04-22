@@ -24,7 +24,7 @@ async def read_encoders(motors):
     return np.array([states[i].values[moteus.Register.POSITION] for i in range(4)])
  
  
-SLACK_THRESHOLD = 0.08  # Nm — below this, cable is likely slack
+SLACK_THRESHOLD = 0.1  # Nm — below this, cable is likely slack
 SLACK_TORQUE = 0.05     # Nm — feedforward to apply when slack
 
 async def execute_move(motors:      dict,
@@ -47,7 +47,7 @@ async def execute_move(motors:      dict,
                 position           = target[mid - 1],
                 velocity           = feedfwd[mid - 1],
                 feedforward_torque = slack_ff[mid - 1],
-                maximum_torque     = MAX_TORQUE,
+                maximum_torque     = MAX_TORQUE * abs(MOTOR_TORQUE_SCALE[mid]),
                 watchdog_timeout   = np.nan,
                 query              = True,
             )
