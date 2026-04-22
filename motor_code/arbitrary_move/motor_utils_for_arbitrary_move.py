@@ -24,30 +24,45 @@ async def read_encoders(motors):
     return np.array([states[i].values[moteus.Register.POSITION] for i in range(4)])
  
  
+SLACK_THRESHOLD = 0.08  # Nm — below this, cable is likely slack
+SLACK_TORQUE = 0.05     # Nm — feedforward to apply when slack
+
 async def execute_move(motors:      dict,
                        ticks:       list) -> np.ndarray:
     """
-    stream pre-planned tick commands to the four motors
+    stream pre-planned tick commands to the four motors.
+    all motors use position control; if a cable goes slack (low torque),
+    feedforward torque is applied to re-tension it.
     returns the actual encoder positions (rev) read back after the final tick
     """
     ids = [1, 2, 3, 4]
- 
+    slack_ff = np.zeros(4)  # per-motor feedforward for slack correction
+
     for tick in ticks:
         target  = tick['target_enc']
         feedfwd = tick['feedfwd_vel']
- 
-        await asyncio.gather(*[
+
+        states = await asyncio.gather(*[
             motors[mid].set_position(
-                position         = target[mid - 1],
-                velocity         = feedfwd[mid - 1],
-                accel_limit      = ACCEL_LIMIT,
-                maximum_torque   = MAX_TORQUE,
-                watchdog_timeout = np.nan,
-                query            = False,   # skip query mid-move for latency
+                position           = target[mid - 1],
+                velocity           = feedfwd[mid - 1],
+                feedforward_torque = slack_ff[mid - 1],
+                maximum_torque     = MAX_TORQUE,
+                watchdog_timeout   = np.nan,
+                query              = True,
             )
             for mid in ids
         ])
         await asyncio.sleep(TICK_RATE)
+
+        # Update slack correction for next tick based on current torque
+        for mid in ids:
+            i = mid - 1
+            torque = states[i].values[moteus.Register.TORQUE]
+            if abs(torque) < SLACK_THRESHOLD:
+                slack_ff[i] = SLACK_TORQUE * MOTOR_TORQUE_SCALE[mid]
+            else:
+                slack_ff[i] = 0.0
  
     # Hold final position and read back actual encoder values
     final_target = ticks[-1]['target_enc']

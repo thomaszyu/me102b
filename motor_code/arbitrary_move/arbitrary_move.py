@@ -46,11 +46,8 @@ def plan_trajectory(start_enc: np.ndarray,
     p_data = np.array([start_xy, end_xy, end_xy, end_xy, end_xy], dtype=float)
     v_data = np.zeros((5, 2))
  
-    a1_xy     = compute_a1(p_data[0], p_data[1], p_data[2], p_data[3],
-                            v_data[0], v_data[1], v_data[2], v_data[3],
-                            zero2, duration)
     coeffs_xy = get_quintic_coeffs_norm(p_data[0], v_data[0], zero2,
-                                        p_data[1], v_data[1], a1_xy, duration)
+                                        p_data[1], v_data[1], zero2, duration)
  
     # step 2. sample at every tick boundary (tau = 0 to 1)
     taus     = np.linspace(0.0, 1.0, num_steps + 1)
@@ -61,7 +58,10 @@ def plan_trajectory(start_enc: np.ndarray,
     enc_path     = np.array([xy_to_enc(xy)                       for xy in xy_path])
     enc_vel_path = np.array([xy_vel_to_enc_vel(xy_path[k], vxy_path[k])
                              for k in range(num_steps + 1)])
- 
+
+    # step 3.5. retraction bias — shorten all cables slightly to maintain tension
+    enc_path = enc_path - SIGNS * TENSION_BIAS_REV
+
     # step 4. offset so planned deltas are rooted at the actual encoder reading
     # enc_path[0] is the geometric start; start_enc is where the motor actually is
     # any discrepancy (slack, slip, prior error) is absorbed here once
@@ -70,6 +70,7 @@ def plan_trajectory(start_enc: np.ndarray,
     ticks = [
         {
             'target_enc':  enc_path[k] + enc_offset,
+            'prev_enc':    enc_path[k - 1] + enc_offset,
             'feedfwd_vel': enc_vel_path[k],
         }
         for k in range(1, num_steps + 1)
@@ -102,7 +103,7 @@ async def move_to(motors:      dict,
     print(f"Move: {np.round(start_xy, 1)} → {np.round(end_xy, 1)}  ({duration:.2f}s)")
  
     ticks     = plan_trajectory(start_enc, end_xy, duration)
-    final_enc = await execute_move(motors, ticks, MAX_TORQUE, ACCEL_LIMIT)
+    final_enc = await execute_move(motors, ticks)
  
     actual_xy = enc_to_xy(final_enc)
     error_mm  = np.linalg.norm(actual_xy - end_xy)
@@ -119,9 +120,9 @@ async def main():
     motors, _ = await initialize_and_calibrate()
  
     # move_to reads encoders fresh each time — just pass the target
-    await move_to(motors, np.array([100.0,  50.0]), duration=2.0)
-    await move_to(motors, np.array([-50.0, -80.0]), duration=2.0)
-    await move_to(motors, np.array([  0.0,   0.0]), duration=2.0)
+    await move_to(motors, np.array([-200.0,  150.0]), duration=2.0)
+    await move_to(motors, np.array([-200.0, -150.0]), duration=2.0)
+    await move_to(motors, np.array([  -300.0,   0.0]), duration=2.0)
  
     print("All moves complete.")
  

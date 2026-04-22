@@ -115,7 +115,7 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
         await asyncio.gather(*tasks)
 
     async def home_sequence():
-        """Home all motors (4->2->1->3) and return cable length."""
+        """Home all motors (4->2->1->3), calibrate spool, return cable length."""
         # Motor 4: Wind back, set 0, record Motor 2
         await stall_and_record(4)
         await motors[4].set_rezero(0.0)
@@ -125,7 +125,7 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
 
         # Motor 2: Wind back, record displacement
         m2_end = (await stall_and_record(2)).values[moteus.Register.POSITION]
-        cable_length = abs(m2_start - m2_end)
+        m2_travel = abs(m2_start - m2_end)
         await motors[2].set_rezero(0.0)
         await hold_all_except(2)
         await asyncio.sleep(0.1)
@@ -134,16 +134,28 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
         await stall_and_record(1)
         await motors[1].set_rezero(0.0)
         await hold_all_except(1)
+        m3_start = (await hold_tension(3)).values[moteus.Register.POSITION]
         await asyncio.sleep(0.1)
 
-        # Motor 3: Wind back, set 0
-        await stall_and_record(3)
+        # Motor 3: Wind back, record displacement
+        m3_end = (await stall_and_record(3)).values[moteus.Register.POSITION]
+        m3_travel = abs(m3_start - m3_end)
         await motors[3].set_rezero(0.0)
         await hold_all_except(3)
         await asyncio.sleep(0.1)
 
-        print(f"Homing complete, cable length={cable_length:.3f}")
-        return cable_length
+        # Calibrate spool circumference from diagonal 1-3
+        from config import CORNER_POSITIONS, SPOOL_CIRC_MM
+        diag_13_mm = np.linalg.norm(CORNER_POSITIONS[1] - CORNER_POSITIONS[3])
+        measured_spool_circ = diag_13_mm / m3_travel
+
+        print(f"Homing complete:")
+        print(f"  Diagonal 1-3: {diag_13_mm:.1f}mm geometric, {m3_travel:.3f} rev → spool_circ={measured_spool_circ:.1f}mm")
+        print(f"  Config spool circ: {SPOOL_CIRC_MM:.1f}mm")
+        if abs(measured_spool_circ - SPOOL_CIRC_MM) > 5:
+            print(f"  WARNING: spool circ mismatch! Update SPOOL_DIAM_MM to {measured_spool_circ/np.pi:.1f}mm")
+
+        return m3_travel
 
     async def move_together_all(length):
         """Move all motors to middle position simultaneously."""
@@ -192,6 +204,8 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
 
     # Second home (more accurate since starting from center)
     length = await home_sequence()
+    
+    await move_together_all(length)
 
     print(f"Calibration Complete: cable_length={length:.3f}")
     return motors, calibration_data
