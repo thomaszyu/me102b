@@ -16,7 +16,7 @@ MOTOR_TORQUE_SCALE = {
     4: -1.0,
 }
 
-FRAME_OFFSET = np.array([-15.0, 0.0])  # [X, Y] mm — shift all corners to align frame with table
+FRAME_OFFSET = np.array([-35.0, -17.0])  # [X, Y] mm — shift all corners to align frame with table
 
 CORNER_POSITIONS = {
     1: np.array([13.8, 291.85]) + FRAME_OFFSET, # front left
@@ -29,10 +29,11 @@ CORNERS = np.array([CORNER_POSITIONS[i] for i in [1, 2, 3, 4]])
 SIGNS = np.array([MOTOR_SIGN[i] for i in [1, 2, 3, 4]])
 
 SPOOL_DIAM_MM = 75.0
-SPOOL_CIRC_MM = 308.2 #tuned
-TICK_RATE = 0.05 # sec
+SPOOL_CIRC_MM = 320.0 #tuned
+TICK_RATE = 0.01 # sec
 
-ACCEL_LIMIT = 5.0 # rev/s^2
-MAX_TORQUE = 2.5 # N m
+ACCEL_LIMIT = 6.0 # rev/s^2
+MAX_TORQUE = 4.0 # N m
 TENSION_BIAS_REV = 0.015 # rev bias to maintain tension lmao ajdkjhasbdkjashdba
 TENSION_TORQUE = 0.05
+MOVE_GAIN = 1.0  # scales encoder delta — increase if mallet undershoots, decrease if overshoots

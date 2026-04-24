@@ -44,7 +44,7 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
                     tasks.append(motors[id].set_position(
                         position=np.nan,
                         kd_scale=1.0,
-                        velocity=-0.75*MOTOR_SIGN[target_id],
+                        velocity=-1.5*MOTOR_SIGN[target_id],
                         maximum_torque=0.75,
                         watchdog_timeout=np.nan,
                         query=True
@@ -202,10 +202,10 @@ async def initialize_and_calibrate(ids=[1, 2, 3, 4]):
     # Move to middle
     await move_together_all(length)
 
-    # Second home (more accurate since starting from center)
-    length = await home_sequence()
+    # # Second home (more accurate since starting from center)
+    # length = await home_sequence()
     
-    await move_together_all(length)
+    # await move_together_all(length)
 
     print(f"Calibration Complete: cable_length={length:.3f}")
     return motors, calibration_data

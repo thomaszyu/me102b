@@ -129,7 +129,7 @@ def correct_parallax_error(tracked_x, tracked_y):
     return true_base_x, true_base_y
 
 
-vid = cv.VideoCapture(0, cv.CAP_V4L2)
+vid = cv.VideoCapture(0)
 vid.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*'MJPG'))
 vid.set(cv.CAP_PROP_FRAME_WIDTH, 1280)
 vid.set(cv.CAP_PROP_FRAME_HEIGHT, 720)
