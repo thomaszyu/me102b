@@ -512,9 +512,19 @@ def decide_strategy(puck, mallet_xy):
 ## MAIN PLAYER LOOP   ##
 ########################
 
-async def play_air_hockey(ctrl, duration=120.0):
+async def play_air_hockey(ctrl, duration=120.0, tick_callback=None):
     """
-    Main air hockey loop. Same motor control pattern as puck_tracker.
+    Main air hockey loop.
+
+    tick_callback (optional): called every tick with a dict of game state:
+        {
+            "puck": PuckTracker, "mallet_xy": np.array, "mallet_valid": bool,
+            "strategy": str, "current_enc": np.array,
+        }
+        Must return a command string:
+            None   — continue normally
+            "pause" — toggle pause (hold position)
+            "stop"  — stop motors and exit loop
     """
     if not ctrl._initialized:
         await ctrl.initialize_ekf()
@@ -540,6 +550,7 @@ async def play_air_hockey(ctrl, duration=120.0):
     current_enc = await read_encoders(ctrl.motors)
 
     last_strategy = 'IDLE'
+    paused = False
 
     print(f"Air hockey player started. Defending X={DEFEND_X:.0f}mm for {duration:.0f}s.")
     print(f"  Workspace: X[{MALLET_X_MIN:.0f}, {MALLET_X_MAX:.0f}] Y[{MALLET_Y_MIN:.0f}, {MALLET_Y_MAX:.0f}]")
@@ -565,8 +576,46 @@ async def play_air_hockey(ctrl, duration=120.0):
         # --- Update puck tracker ---
         puck.update(puck_reading, puck_reading[2])
 
+        mallet_xy = ctrl.ekf.position
+        mallet_valid = mallet_lost_count < MAX_MALLET_LOST
+
+        # --- Tick callback (display, pause/stop, etc.) ---
+        strategy = last_strategy  # default for callback before strategy runs
+        if tick_callback is not None:
+            cmd = tick_callback({
+                "puck": puck,
+                "mallet_xy": mallet_xy,
+                "mallet_valid": mallet_valid,
+                "strategy": strategy,
+                "current_enc": current_enc,
+                "paused": paused,
+            })
+            if cmd == "stop":
+                await asyncio.gather(*[ctrl.motors[mid].set_stop() for mid in ids])
+                print("Player stopped by callback.")
+                return "stop"
+            elif cmd == "pause":
+                paused = not paused
+                if paused:
+                    print("Player paused.")
+                    _attack.reset()
+                else:
+                    print("Player resumed.")
+
+        # --- If paused, hold position ---
+        if paused:
+            await asyncio.gather(*[
+                ctrl.motors[mid].set_position(
+                    position=current_enc[mid - 1], velocity=0.0,
+                    maximum_torque=MAX_TORQUE * abs(MOTOR_TORQUE_SCALE[mid]),
+                    watchdog_timeout=np.nan, query=True,
+                ) for mid in ids
+            ])
+            await asyncio.sleep(TICK_RATE)
+            continue
+
         # --- Safety freeze ---
-        if mallet_lost_count >= MAX_MALLET_LOST:
+        if not mallet_valid:
             states = await asyncio.gather(*[
                 ctrl.motors[mid].set_position(
                     position=current_enc[mid - 1], velocity=0.0,
@@ -581,7 +630,6 @@ async def play_air_hockey(ctrl, duration=120.0):
             continue
 
         # --- Decide strategy ---
-        mallet_xy = ctrl.ekf.position
         strategy, target_data, target_vel = decide_strategy(puck, mallet_xy)
 
         # --- Compute commanded position + velocity ---
