@@ -205,6 +205,7 @@ class VisionSystem:
         # Tracked world coords (internal, for display)
         self.real_x, self.real_y = 0.0, 0.0
         self.real_mallet_x, self.real_mallet_y = 0.0, 0.0
+        self._mallet_lost_streak = 0
 
     def get_positions(self):
         """Thread-safe read of latest positions.
@@ -386,16 +387,21 @@ class VisionSystem:
 
                     # Reject jumps — mallet can't teleport
                     MALLET_MAX_JUMP_MM = 60.0  # max plausible movement per frame
+                    MALLET_REACQUIRE_FRAMES = 5  # after this many lost frames, accept any detection
                     dx = new_x - self.real_mallet_x
                     dy = new_y - self.real_mallet_y
                     jump = np.sqrt(dx*dx + dy*dy)
-                    if jump < MALLET_MAX_JUMP_MM or not hasattr(self, '_mallet_ever_seen'):
+                    if (jump < MALLET_MAX_JUMP_MM
+                            or not hasattr(self, '_mallet_ever_seen')
+                            or self._mallet_lost_streak >= MALLET_REACQUIRE_FRAMES):
                         self.real_mallet_x = new_x
                         self.real_mallet_y = new_y
                         self._mallet_ever_seen = True
+                        self._mallet_lost_streak = 0
                         self.positions.update_mallet(self.real_mallet_x, self.real_mallet_y)
                     else:
                         # Jump detected — don't update, treat as lost
+                        self._mallet_lost_streak = getattr(self, '_mallet_lost_streak', 0) + 1
                         self.positions.mark_mallet_lost()
                 else:
                     self.positions.mark_mallet_lost()
