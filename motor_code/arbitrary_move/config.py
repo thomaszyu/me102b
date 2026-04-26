@@ -29,11 +29,19 @@ CORNERS = np.array([CORNER_POSITIONS[i] for i in [1, 2, 3, 4]])
 SIGNS = np.array([MOTOR_SIGN[i] for i in [1, 2, 3, 4]])
 
 SPOOL_DIAM_MM = 75.0
-SPOOL_CIRC_MM = 320.0 #tuned
+SPOOL_CIRC_MM = np.pi*SPOOL_DIAM_MM #tuned
 TICK_RATE = 0.01 # sec
 
-ACCEL_LIMIT = 6.0 # rev/s^2
-MAX_TORQUE = 4.0 # N m
+ACCEL_LIMIT = 20.0 # rev/s^2
+MAX_TORQUE = 12.0 # N m
+VEL_LIMIT = 2.0  # rev/s — max motor speed (~2400 mm/s cable speed)
+KP_SCALE = 0.8    # moteus position P gain scale
+KD_SCALE = 1.0   # moteus position D gain scale
 TENSION_BIAS_REV = 0.015 # rev bias to maintain tension lmao ajdkjhasbdkjashdba
 TENSION_TORQUE = 0.05
 MOVE_GAIN = 1.0  # scales encoder delta — increase if mallet undershoots, decrease if overshoots
+
+# XY motion profile (trapezoidal velocity in mm/s and mm/s²)
+XY_MAX_VEL = 400.0     # mm/s — cruise velocity
+XY_ACCEL = 4000.0       # mm/s² — acceleration phase
+XY_DECEL = 4000.0       # mm/s² — deceleration phase

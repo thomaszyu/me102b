@@ -22,16 +22,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vision_c
 
 from air_hockey_player import (
     PuckTracker, predict_puck_trajectory, predict_intercept_y, decide_strategy,
+    plan_attack, _attack, CONTACT_DIST, GOAL_Y_HALF,
+    clamp_to_workspace,
     TABLE_X_MIN, TABLE_X_MAX, TABLE_Y_MIN, TABLE_Y_MAX, CORNER_RADIUS,
     PUCK_X_MIN, PUCK_X_MAX, PUCK_Y_MIN, PUCK_Y_MAX, PUCK_RADIUS,
     MALLET_X_MIN, MALLET_X_MAX, MALLET_Y_MIN, MALLET_Y_MAX,
     DEFEND_X, ATTACK_LIMIT_X, ATTACK_ZONE_X, OPPONENT_GOAL_X,
+    OPPONENT_GOAL_CENTER_Y,
 )
 
 # Display config
 DISPLAY_W = 960
 DISPLAY_H = 540
 MARGIN = 40
+TABLE_BORDER_OFFSET = 50.0  # mm — push drawn table wall outward (tune to match camera)
 
 
 def mm_to_px(x_mm, y_mm):
@@ -67,8 +71,9 @@ def _draw_rounded_rect(frame, xn, xx, yn, yx, r, color, thickness):
 
 def draw_table(frame):
     """Draw table wall + puck boundary, center line, goals, defense line."""
-    # Actual wall
-    _draw_rounded_rect(frame, TABLE_X_MIN, TABLE_X_MAX, TABLE_Y_MIN, TABLE_Y_MAX,
+    # Actual wall (offset outward to match camera)
+    o = TABLE_BORDER_OFFSET
+    _draw_rounded_rect(frame, TABLE_X_MIN - o, TABLE_X_MAX + o, TABLE_Y_MIN - o, TABLE_Y_MAX + o,
                        CORNER_RADIUS, (100, 100, 100), 1)
 
     # Puck center boundary (where the puck center can actually reach)
@@ -172,33 +177,134 @@ def draw_target(frame, strategy, target_xy):
         tx, ty = mm_to_px(DEFEND_X, target_xy)
     else:
         tx, ty = mm_to_px(target_xy[0], target_xy[1])
-    color = (0, 0, 255) if strategy == 'DEFEND' else (255, 100, 0) if strategy == 'ATTACK' else (128, 128, 128)
+
+    if strategy == 'DEFEND':
+        color = (0, 0, 255)
+    elif strategy in ('WINDUP', 'STRIKE'):
+        color = (0, 255, 255)
+    else:
+        color = (128, 128, 128)
+
     cv.drawMarker(frame, (tx, ty), color, cv.MARKER_CROSS, 20, 2)
     cv.putText(frame, strategy, (tx + 12, ty - 5),
                cv.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
 
 
-def build_debug_homography():
+def draw_attack_plan(frame, puck, mallet_xy, mallet_valid):
     """
-    Build a homography that warps the rectified camera image (862x480, world coords)
-    onto the debug display, mapping table mm coords to debug pixel coords.
+    Draw the attack trajectory:
+      - Full spline path (approach → follow-through → return)
+      - Contact point
+      - Animated mallet ghost showing current trajectory tick
+      - Goal aim line
+    When no active attack, shows a ghost plan if one is viable.
     """
-    # Source: 4 corners in the rectified camera image (pixel coords in 862x480 frame)
-    # These correspond to the world_pts from vision.py calibration
-    # world_pts maps to: TL(-273,240), TR(273,240), BR(273,-240), BL(-273,-240)
-    # In the 862x480 rectified image, these map to display_pts from vision.py
-    from vision import display_pts as cam_display_pts
-    src_pts = cam_display_pts.copy()  # where the world corners appear in the camera image
+    if not mallet_valid or not puck.initialized:
+        return
 
-    # Destination: where those same world corners appear in our debug display
-    dst_pts = np.array([
-        mm_to_px(-273,  240),
-        mm_to_px( 273,  240),
-        mm_to_px( 273, -240),
-        mm_to_px(-273, -240),
-    ], dtype="float32")
+    # Goal target zone
+    g_top = mm_to_px(OPPONENT_GOAL_X, GOAL_Y_HALF)
+    g_bot = mm_to_px(OPPONENT_GOAL_X, -GOAL_Y_HALF)
+    cv.line(frame, g_top, g_bot, (255, 0, 255), 3)
 
-    return cv.getPerspectiveTransform(src_pts, dst_pts)
+    # --- Active trajectory: draw full spline + animated ghost mallet ---
+    if _attack.phase is not None and _attack.traj_pos is not None:
+        traj = _attack.traj_pos
+        k = _attack.traj_tick
+
+        # Draw full trajectory path (color-coded by phase)
+        for i in range(len(traj) - 1):
+            p1 = mm_to_px(traj[i][0], traj[i][1])
+            p2 = mm_to_px(traj[i + 1][0], traj[i + 1][1])
+            # Fade from cyan (start) to yellow (contact) to green (return)
+            progress = i / max(len(traj) - 1, 1)
+            if progress < 0.5:
+                color = (255, 255, 0)   # cyan-ish for approach
+            elif progress < 0.7:
+                color = (0, 255, 255)   # yellow for follow-through
+            else:
+                color = (0, 200, 0)     # green for return
+            cv.line(frame, p1, p2, color, 2, cv.LINE_AA)
+
+        # Contact point (white circle)
+        if _attack.contact_pos is not None:
+            cx, cy = mm_to_px(_attack.contact_pos[0], _attack.contact_pos[1])
+            cv.circle(frame, (cx, cy), 10, (255, 255, 255), 2)
+            cv.putText(frame, "HIT", (cx + 12, cy - 5),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+            # Aim line from contact to goal
+            gx, gy = mm_to_px(OPPONENT_GOAL_X, OPPONENT_GOAL_CENTER_Y)
+            cv.line(frame, (cx, cy), (gx, gy), (255, 0, 255), 1, cv.LINE_AA)
+
+        # Animated ghost mallet at current trajectory tick
+        if 0 <= k < len(traj):
+            gx, gy = mm_to_px(traj[k][0], traj[k][1])
+            cv.circle(frame, (gx, gy), 12, (0, 255, 255), 3)
+            cv.circle(frame, (gx, gy), 4, (0, 255, 255), -1)
+
+        # Progress indicator
+        progress_pct = int(100 * k / max(len(traj), 1))
+        cv.putText(frame, f"ATTACK {progress_pct}%", (10, 75),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        return
+
+    # --- No active plan: show ghost plan if viable ---
+    defend_pos = clamp_to_workspace(np.array([DEFEND_X, 0.0]))
+    plan = plan_attack(puck, mallet_xy, defend_pos)
+    if plan is None:
+        return
+
+    traj_pos, traj_vel, contact, strike_dir, start = plan
+
+    # Ghost trajectory path (dim)
+    for i in range(0, len(traj_pos) - 1, 2):  # every other point for perf
+        p1 = mm_to_px(traj_pos[i][0], traj_pos[i][1])
+        p2 = mm_to_px(traj_pos[min(i + 2, len(traj_pos) - 1)][0],
+                       traj_pos[min(i + 2, len(traj_pos) - 1)][1])
+        cv.line(frame, p1, p2, (100, 100, 0), 1, cv.LINE_AA)
+
+    # Ghost contact
+    cx, cy = mm_to_px(contact[0], contact[1])
+    cv.circle(frame, (cx, cy), 6, (128, 128, 128), 1)
+
+    cv.putText(frame, "PLAN", (cx + 10, cy - 8),
+               cv.FONT_HERSHEY_SIMPLEX, 0.3, (128, 128, 0), 1)
+
+
+def build_debug_homography(vis):
+    """
+    Build a homography that warps the raw camera frame (vis.frame)
+    directly onto the debug display.
+
+    Composes H_matrix (pixel → world mm) with the mm_to_px affine
+    transform (world mm → debug pixels). No inversion needed.
+    """
+    if vis.H_matrix is None:
+        return None
+
+    # mm_to_px as a 3x3 affine matrix:
+    #   debug_px = scale_x * (x_mm - x_origin) + MARGIN
+    #   debug_py = scale_y * (y_origin - y_mm) + MARGIN  (Y flipped)
+    pad = 20
+    x_min = TABLE_X_MIN - pad
+    x_max = TABLE_X_MAX + pad
+    y_min = TABLE_Y_MIN - pad
+    y_max = TABLE_Y_MAX + pad
+
+    sx = (DISPLAY_W - 2 * MARGIN) / (x_max - x_min)
+    sy = (DISPLAY_H - 2 * MARGIN) / (y_max - y_min)
+
+    H_world_to_debug = np.array([
+        [sx,   0.0,  MARGIN - sx * x_min],
+        [0.0, -sy,   MARGIN + sy * y_max],
+        [0.0,  0.0,  1.0],
+    ], dtype="float64")
+
+    # H_matrix maps raw pixel → world mm
+    # Combined: raw pixel → world mm → debug pixel
+    return H_world_to_debug @ vis.H_matrix
 
 
 def main():
@@ -208,6 +314,7 @@ def main():
     vis.start(show_display=False)
 
     puck = PuckTracker(alpha_pos=0.5, alpha_vel=0.3, max_jump=100.0)
+    smoothed_target = np.array([DEFEND_X, 0.0])  # smoothed defense target
 
     src = "calibration" if CORNER_RADIUS > 0 else "defaults"
     print(f"Debug visualizer running (table bounds from {src}). Press 'q' to quit.")
@@ -215,10 +322,10 @@ def main():
     cv.namedWindow('Air Hockey Debug')
     last_time = time.time()
 
-    # Build homography from camera rectified → debug display
+    # Build homography from raw camera frame → debug display
     H_cam_to_debug = None
-    if vis.H_display is not None:
-        H_cam_to_debug = build_debug_homography()
+    if vis.H_matrix is not None:
+        H_cam_to_debug = build_debug_homography(vis)
 
     OVERLAY_ALPHA = 0.4  # camera feed dimming (0=invisible, 1=full brightness)
 
@@ -232,28 +339,45 @@ def main():
         puck.update(puck_reading, puck_reading[2], now)
 
         mallet_xy = np.array([mallet_reading[0], mallet_reading[1]])
-        strategy, target_data = decide_strategy(puck, mallet_xy)
+        strategy, target_data, _ = decide_strategy(puck, mallet_xy)
+
+        # Simulate the smoothed defense target (same filter as main loop)
+        if strategy == 'DEFEND' and target_data is not None:
+            raw_target = np.array([DEFEND_X, target_data if isinstance(target_data, (int, float)) else target_data[1]])
+        elif strategy == 'STRIKE' and target_data is not None:
+            raw_target = np.array(target_data[:2]) if hasattr(target_data, '__len__') else smoothed_target
+        else:
+            raw_target = np.array([DEFEND_X, 0.0])
+        alpha = 1.0 if strategy == 'STRIKE' else 0.15
+        smoothed_target = (1 - alpha) * smoothed_target + alpha * raw_target
 
         # --- Background: camera feed or black ---
         frame = np.zeros((DISPLAY_H, DISPLAY_W, 3), dtype=np.uint8)
 
-        if vis.frame is not None and vis.H_display is not None:
+        if vis.frame is not None and vis.H_matrix is not None:
             # Build homography lazily (in case calibration loaded after start)
             if H_cam_to_debug is None:
-                H_cam_to_debug = build_debug_homography()
+                H_cam_to_debug = build_debug_homography(vis)
 
-            # Warp raw camera → rectified → debug display coords
-            H_combined = H_cam_to_debug @ vis.H_display
-            warped = cv.warpPerspective(vis.frame, H_combined, (DISPLAY_W, DISPLAY_H))
+            # Warp raw camera frame directly to debug display
+            warped = cv.warpPerspective(vis.frame, H_cam_to_debug, (DISPLAY_W, DISPLAY_H))
             frame = (warped * OVERLAY_ALPHA).astype(np.uint8)
 
         # --- Draw overlays ---
         draw_table(frame)
         draw_predicted_trajectory(frame, puck)
         draw_intercept(frame, puck)
+        draw_attack_plan(frame, puck, mallet_xy, mallet_reading[2])
         draw_puck(frame, puck)
         draw_mallet(frame, mallet_xy, mallet_reading[2])
         draw_target(frame, strategy, target_data)
+
+        # Draw smoothed target (small blue dot — where the mallet would actually go)
+        if strategy != 'STRIKE':
+            stx, sty = mm_to_px(smoothed_target[0], smoothed_target[1])
+            cv.circle(frame, (stx, sty), 5, (255, 100, 0), -1)
+            cv.putText(frame, "smoothed", (stx + 8, sty + 4),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.3, (255, 100, 0), 1)
 
         cv.putText(frame, f"FPS: {int(fps)}", (10, 25),
                    cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)

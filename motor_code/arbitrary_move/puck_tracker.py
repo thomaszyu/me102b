@@ -136,7 +136,7 @@ async def track_puck_y(ctrl, x_line=None, duration=30.0):
             states[i].values[moteus.Register.POSITION] for i in range(4)
         ])
 
-        # Slack detection
+        # Slack detection (torque-based)
         for mid in ids:
             i = mid - 1
             torque = states[i].values[moteus.Register.TORQUE]
