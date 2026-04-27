@@ -188,6 +188,33 @@ def make_display_callback(link, vis):
 ## MAIN               ##
 ########################
 
+MOTOR_IDS = [1, 2, 3, 4]
+
+
+async def shutdown_motors(motors):
+    """Send set_stop() to every cable-robot motor. Tolerant of missing motors
+    or transient failures so we always get as close to a clean shutdown as
+    we can before the program exits."""
+    if not motors:
+        return
+    print("[game] Stopping motors...")
+    tasks = []
+    for mid in MOTOR_IDS:
+        m = motors.get(mid) if isinstance(motors, dict) else None
+        if m is None:
+            continue
+        try:
+            tasks.append(m.set_stop())
+        except Exception as e:
+            print(f"[game] motor {mid}: set_stop() raised {e!r}")
+    if tasks:
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"[game] shutdown_motors gather: {e!r}")
+    print("[game] Motors stopped.")
+
+
 async def main(link):
     # 1) Wait for the user to tap a difficulty + START on the display.
     print("Waiting for START GAME from display...")
@@ -198,32 +225,61 @@ async def main(link):
 
     # ---- From here on, this mirrors air_hockey_player.main() exactly. ----
 
-    # Start vision
-    vis = VisionSystem()
-    vis.start(show_display=False)
-    print("Waiting for camera...")
-    await asyncio.sleep(1.0)
+    vis = None
+    motors = None
+    try:
+        # Start vision
+        vis = VisionSystem()
+        vis.start(show_display=False)
+        print("Waiting for camera...")
+        await asyncio.sleep(1.0)
 
-    # Home motors
-    motors, _ = await initialize_and_calibrate()
+        # Home motors
+        motors, _ = await initialize_and_calibrate()
 
-    # Create controller + initialize EKF
-    ctrl = EKFController(motors, vis)
-    await ctrl.initialize_ekf()
+        # Create controller + initialize EKF
+        ctrl = EKFController(motors, vis)
+        await ctrl.initialize_ekf()
 
-    # Move to starting defense position
-    await ctrl.move_to(np.array([DEFEND_X, 0.0]), duration=0.5)
+        # Move to starting defense position
+        await ctrl.move_to(np.array([DEFEND_X, 0.0]), duration=0.5)
 
-    # Play! (same call as air_hockey_player.main(), just with a callback)
-    callback = make_display_callback(link, vis)
-    await play_air_hockey(
-        ctrl,
-        duration=120.0,
-        tick_callback=callback,
-        max_speed_normal=max_speed,
-    )
+        # Play! (same call as air_hockey_player.main(), just with a callback)
+        callback = make_display_callback(link, vis)
+        game_result = await play_air_hockey(
+            ctrl,
+            duration=120.0,
+            tick_callback=callback,
+            max_speed_normal=max_speed,
+        )
+        # Winner is decided strictly at the 120s buzzer.
+        # If user hit STOP, skip winner announcement.
+        if game_result != "stop":
+            score_us = int(getattr(vis, "robot_score", 0))
+            score_them = int(getattr(vis, "player_score", 0))
+            if score_us > score_them:
+                winner = "robot"
+            elif score_them > score_us:
+                winner = "player"
+            else:
+                winner = "draw"
 
-    vis.stop()
+            # Set winner in vision so OpenCV overlay can show it if enabled.
+            vis.winner = winner
+            link.send({
+                "type": "win",
+                "by": winner,
+                "su": score_us,
+                "st": score_them,
+            })
+            print(f"=== TIME UP (120s): winner={winner} final us:{score_us} / them:{score_them} ===")
+    finally:
+        # Always make sure the motors are de-energized when the game ends —
+        # whether that's a win, a STOP press, the duration timer expiring,
+        # or an exception.
+        await shutdown_motors(motors)
+        if vis is not None:
+            vis.stop()
 
 
 def _build_link():

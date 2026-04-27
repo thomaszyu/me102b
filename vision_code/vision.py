@@ -30,6 +30,9 @@ CALIBRATION_FILE = os.path.join(os.path.dirname(__file__), "calibration.json")
 CAMERA_HEIGHT_MM = 305.0
 MALLET_HEIGHT_MM = 22.175
 
+# Winning score — first side to reach this wins. Tweak as desired.
+WIN_SCORE = 7
+
 # Calibration target coords
 world_pts = np.array([
     [-273,  240],
@@ -194,6 +197,8 @@ class VisionSystem:
         self.current_state = "SEARCHING"
         self.robot_score = 0
         self.player_score = 0
+        # Winner once either side reaches WIN_SCORE: "robot" | "player" | None
+        self.winner = None
         self.frames_visible = 0
         self.frames_lost = 0
         self.evaluate_timer = 0
@@ -212,6 +217,23 @@ class VisionSystem:
         Returns ((mallet_x, mallet_y, valid), (puck_x, puck_y, valid), timestamp)
         """
         return self.positions.get()
+
+    def _check_winner(self):
+        """Latch a winner once either side reaches WIN_SCORE."""
+        if self.winner is not None:
+            return  # already decided — don't overwrite
+        if self.robot_score >= WIN_SCORE:
+            self.winner = "robot"
+            print(f"=== ROBOT WINS! Final {self.robot_score}-{self.player_score} ===")
+        elif self.player_score >= WIN_SCORE:
+            self.winner = "player"
+            print(f"=== PLAYER WINS! Final {self.robot_score}-{self.player_score} ===")
+
+    def reset_scores(self):
+        """Reset scores and winner state. Call this between games."""
+        self.robot_score = 0
+        self.player_score = 0
+        self.winner = None
 
     def start(self, show_display=False):
         """Start vision in a background thread."""
@@ -481,6 +503,45 @@ class VisionSystem:
 
                 for pt in self.calibration_clicks:
                     cv.circle(frame, tuple(pt), 5, (0, 165, 255), -1)
+
+                # Winner banner — drawn last so it sits on top of everything.
+                if self.winner is not None:
+                    if self.winner == "robot":
+                        banner_text = "ROBOT WINS!"
+                        banner_color = (0, 255, 0)
+                    else:
+                        banner_text = "PLAYER WINS!"
+                        banner_color = (255, 0, 255)
+
+                    h, w = frame.shape[:2]
+                    bw, bh = 700, 130
+                    bx = (w - bw) // 2
+                    by = (h - bh) // 2
+
+                    overlay = frame.copy()
+                    cv.rectangle(overlay, (bx, by), (bx + bw, by + bh),
+                                 (0, 0, 0), -1)
+                    cv.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+                    cv.rectangle(frame, (bx, by), (bx + bw, by + bh),
+                                 banner_color, 4)
+                    cv.rectangle(frame, (bx + 4, by + 4),
+                                 (bx + bw - 4, by + bh - 4),
+                                 banner_color, 2)
+
+                    text_size, _ = cv.getTextSize(
+                        banner_text, cv.FONT_HERSHEY_SIMPLEX, 2.4, 5)
+                    tx = bx + (bw - text_size[0]) // 2
+                    ty = by + (bh + text_size[1]) // 2 - 10
+                    cv.putText(frame, banner_text, (tx, ty),
+                               cv.FONT_HERSHEY_SIMPLEX, 2.4, banner_color, 5)
+
+                    score_text = f"{self.robot_score} - {self.player_score}"
+                    sts, _ = cv.getTextSize(
+                        score_text, cv.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+                    cv.putText(frame, score_text,
+                               (bx + (bw - sts[0]) // 2, by + bh - 12),
+                               cv.FONT_HERSHEY_SIMPLEX, 0.9,
+                               (255, 255, 255), 2)
 
                 cv.imshow('frame', frame)
                 cv.setMouseCallback('frame', self._on_mouse)

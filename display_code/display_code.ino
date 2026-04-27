@@ -154,6 +154,12 @@ unsigned long goalBannerEndMs = 0;
 char goalBannerText[24] = "";
 uint16_t goalBannerColor = TFT_WHITE;
 
+// Winner banner — set on a {"type":"win",...} message. Stays up until the
+// user hits STOP / returns to menu (game is over).
+bool winnerActive = false;
+char winnerText[24] = "";
+uint16_t winnerColor = TFT_WHITE;
+
 // ===================== COORDINATE MAPPING =========
 
 int16_t mmToPxX(float x_mm)
@@ -502,6 +508,9 @@ bool goalBannerActive()
 void serviceGoalBanner()
 {
     // Called every loop tick. Clears the banner once it expires.
+    // If a winner banner has been raised in the meantime, leave it alone.
+    if (winnerActive)
+        return;
     if (goalBannerEndMs > 0 && (long)(millis() - goalBannerEndMs) >= 0)
     {
         goalBannerEndMs = 0;
@@ -531,6 +540,65 @@ void triggerGoalBanner(const char *who)
     {
         drawScoreBar();
         drawGoalBanner();
+    }
+}
+
+// ===================== WINNER BANNER ==============
+//
+// Persistent (no expiration) banner shown once vision detects a winner.
+// Stays up until the user taps STOP and we returnToMenu().
+
+void drawWinnerBanner()
+{
+    int16_t bw = TABLE_PX_W - 30;
+    int16_t bh = 110;
+    int16_t bx = TABLE_PX_X + 15;
+    int16_t by = TABLE_PX_Y + (TABLE_PX_H - bh) / 2;
+
+    tft.fillRoundRect(bx, by, bw, bh, 14, TFT_BLACK);
+    tft.drawRoundRect(bx, by, bw, bh, 14, winnerColor);
+    tft.drawRoundRect(bx + 1, by + 1, bw - 2, bh - 2, 13, winnerColor);
+    tft.drawRoundRect(bx + 2, by + 2, bw - 4, bh - 4, 12, winnerColor);
+
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(winnerColor, TFT_BLACK);
+    tft.drawString(winnerText, bx + bw / 2, by + bh / 2 - 14, 4);
+
+    // Subtitle with final score
+    char sub[32];
+    snprintf(sub, sizeof(sub), "Final  %d - %d", scoreUs, scoreThem);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(sub, bx + bw / 2, by + bh / 2 + 22, 2);
+}
+
+void triggerWinnerBanner(const char *who)
+{
+    if (strcmp(who, "robot") == 0)
+    {
+        snprintf(winnerText, sizeof(winnerText), "ROBOT WINS!");
+        winnerColor = COL_OUR_GOAL;
+    }
+    else if (strcmp(who, "draw") == 0)
+    {
+        snprintf(winnerText, sizeof(winnerText), "DRAW!");
+        winnerColor = TFT_YELLOW;
+    }
+    else
+    {
+        snprintf(winnerText, sizeof(winnerText), "PLAYER WINS!");
+        winnerColor = COL_THEIR_GOAL;
+    }
+    winnerActive = true;
+    // Cancel any in-flight goal banner so it doesn't expire on top of the
+    // winner banner and wipe it.
+    goalBannerEndMs = 0;
+    if (currentScreen == SCREEN_GAME)
+    {
+        // Wipe the table area so the winner banner sits on a clean field.
+        tft.fillRect(TABLE_PX_X, TABLE_PX_Y, TABLE_PX_W, TABLE_PX_H, TFT_BLACK);
+        redrawTableLines();
+        drawScoreBar();
+        drawWinnerBanner();
     }
 }
 
@@ -665,10 +733,10 @@ void processIncomingMessage(const char *buf)
 
         if (currentScreen == SCREEN_GAME)
         {
-            if (scoreChanged)
+            if (scoreChanged && !winnerActive)
                 drawScoreBar();
-            // Don't repaint dynamic content over the banner.
-            if (!goalBannerActive())
+            // Don't repaint dynamic content over either banner.
+            if (!goalBannerActive() && !winnerActive)
                 updateGameView();
         }
     }
@@ -676,7 +744,7 @@ void processIncomingMessage(const char *buf)
     {
         scoreUs = (int)jsonFloat(buf, "su", scoreUs);
         scoreThem = (int)jsonFloat(buf, "st", scoreThem);
-        if (currentScreen == SCREEN_GAME)
+        if (currentScreen == SCREEN_GAME && !winnerActive)
             drawScoreBar();
     }
     else if (strcmp(type, "goal") == 0)
@@ -686,7 +754,17 @@ void processIncomingMessage(const char *buf)
         scoreThem = (int)jsonFloat(buf, "st", scoreThem);
         char by[16] = "";
         jsonString(buf, "by", by, sizeof(by));
-        triggerGoalBanner(by);
+        if (!winnerActive) // game already over → ignore late goals
+            triggerGoalBanner(by);
+    }
+    else if (strcmp(type, "win") == 0)
+    {
+        // Final score + persistent winner banner.
+        scoreUs = (int)jsonFloat(buf, "su", scoreUs);
+        scoreThem = (int)jsonFloat(buf, "st", scoreThem);
+        char by[16] = "";
+        jsonString(buf, "by", by, sizeof(by));
+        triggerWinnerBanner(by);
     }
 }
 
@@ -791,6 +869,8 @@ void returnToMenu()
     prevMalletPX = -1;
     prevTrajLen = 0;
     goalBannerEndMs = 0;
+    winnerActive = false;
+    winnerText[0] = '\0';
     drawMenuUI();
 }
 
