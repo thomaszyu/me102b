@@ -1,0 +1,7 @@
+{
+    "python.analysis.extraPaths": [
+        "./display_code",
+        "./motor_code/arbitrary_move",
+        "./vision_code"
+    ]
+}

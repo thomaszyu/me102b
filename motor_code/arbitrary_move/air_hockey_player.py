@@ -512,7 +512,7 @@ def decide_strategy(puck, mallet_xy):
 ## MAIN PLAYER LOOP   ##
 ########################
 
-async def play_air_hockey(ctrl, duration=120.0, tick_callback=None):
+async def play_air_hockey(ctrl, duration=120.0, tick_callback=None, max_speed_normal=400.0):
     """
     Main air hockey loop.
 
@@ -525,6 +525,7 @@ async def play_air_hockey(ctrl, duration=120.0, tick_callback=None):
             None   — continue normally
             "pause" — toggle pause (hold position)
             "stop"  — stop motors and exit loop
+    max_speed_normal: max mallet speed (mm/s) for DEFEND/IDLE ramping.
     """
     if not ctrl._initialized:
         await ctrl.initialize_ekf()
@@ -543,7 +544,7 @@ async def play_air_hockey(ctrl, duration=120.0, tick_callback=None):
     commanded_xy = ctrl.ekf.position.copy()
     smooth_target_enc = None   # smoothed motor commands (filters EKF noise)
     CMD_ALPHA = 0.3            # motor command smoothing (0=frozen, 1=no filter)
-    MAX_SPEED_NORMAL = 400.0   # mm/s for defend/idle
+    MAX_SPEED_NORMAL = float(max_speed_normal)  # mm/s for defend/idle
     loop_time = time.time()
 
     # Seed encoders

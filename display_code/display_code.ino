@@ -147,6 +147,13 @@ int trajContactIdx = -1; // index of the contact point, -1 if none
 float trajPrevPxX[MAX_TRAJ_PTS], trajPrevPxY[MAX_TRAJ_PTS];
 int prevTrajLen = 0;
 
+// Goal banner — when the laptop fires a {"type":"goal", ...} message we
+// pop a 3-second banner across the table area announcing who scored.
+#define GOAL_BANNER_MS 3000
+unsigned long goalBannerEndMs = 0;
+char goalBannerText[24] = "";
+uint16_t goalBannerColor = TFT_WHITE;
+
 // ===================== COORDINATE MAPPING =========
 
 int16_t mmToPxX(float x_mm)
@@ -448,6 +455,85 @@ void updateGameView()
     drawAllDynamic();
 }
 
+// ===================== GOAL BANNER ================
+//
+// While goalBannerEndMs > 0 and millis() < goalBannerEndMs, we draw a
+// big banner across the middle of the table announcing who scored, and
+// suppress the per-tick puck/mallet redraw so it doesn't get covered.
+//
+// When the banner expires, we wipe the table area to black, repaint the
+// static lines, and reset the prev* dynamic-position trackers so the
+// next "state" message redraws everything cleanly.
+
+void drawGoalBanner()
+{
+    int16_t bw = TABLE_PX_W - 40;
+    int16_t bh = 70;
+    int16_t bx = TABLE_PX_X + 20;
+    int16_t by = TABLE_PX_Y + (TABLE_PX_H - bh) / 2;
+
+    tft.fillRoundRect(bx, by, bw, bh, 12, TFT_BLACK);
+    tft.drawRoundRect(bx, by, bw, bh, 12, goalBannerColor);
+    tft.drawRoundRect(bx + 1, by + 1, bw - 2, bh - 2, 11, goalBannerColor);
+
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(goalBannerColor, TFT_BLACK);
+    tft.drawString(goalBannerText, bx + bw / 2, by + bh / 2, 4);
+}
+
+void clearGoalBanner()
+{
+    // Wipe the inside of the table area and repaint the static lines.
+    tft.fillRect(TABLE_PX_X, TABLE_PX_Y, TABLE_PX_W, TABLE_PX_H, TFT_BLACK);
+    redrawTableLines();
+
+    // Force the next state message to fully repaint puck/mallet/trajectory.
+    prevPuckPX = -1;
+    prevMalletPX = -1;
+    prevTrajLen = 0;
+    prevTrajContactIdx = -1;
+}
+
+bool goalBannerActive()
+{
+    return goalBannerEndMs > 0 && (long)(millis() - goalBannerEndMs) < 0;
+}
+
+void serviceGoalBanner()
+{
+    // Called every loop tick. Clears the banner once it expires.
+    if (goalBannerEndMs > 0 && (long)(millis() - goalBannerEndMs) >= 0)
+    {
+        goalBannerEndMs = 0;
+        if (currentScreen == SCREEN_GAME)
+        {
+            clearGoalBanner();
+        }
+    }
+}
+
+void triggerGoalBanner(const char *who)
+{
+    if (strcmp(who, "robot") == 0)
+    {
+        snprintf(goalBannerText, sizeof(goalBannerText), "ROBOT SCORES!");
+        goalBannerColor = COL_OUR_GOAL;
+    }
+    else
+    {
+        snprintf(goalBannerText, sizeof(goalBannerText), "PLAYER SCORES!");
+        goalBannerColor = COL_THEIR_GOAL;
+    }
+    goalBannerEndMs = millis() + GOAL_BANNER_MS;
+    if (goalBannerEndMs == 0)
+        goalBannerEndMs = 1; // avoid the "disabled" sentinel
+    if (currentScreen == SCREEN_GAME)
+    {
+        drawScoreBar();
+        drawGoalBanner();
+    }
+}
+
 // ===================== COMMUNICATION ==============
 
 // Forward decl
@@ -581,7 +667,9 @@ void processIncomingMessage(const char *buf)
         {
             if (scoreChanged)
                 drawScoreBar();
-            updateGameView();
+            // Don't repaint dynamic content over the banner.
+            if (!goalBannerActive())
+                updateGameView();
         }
     }
     else if (strcmp(type, "score") == 0)
@@ -590,6 +678,15 @@ void processIncomingMessage(const char *buf)
         scoreThem = (int)jsonFloat(buf, "st", scoreThem);
         if (currentScreen == SCREEN_GAME)
             drawScoreBar();
+    }
+    else if (strcmp(type, "goal") == 0)
+    {
+        // Update score and pop the 3-second banner.
+        scoreUs = (int)jsonFloat(buf, "su", scoreUs);
+        scoreThem = (int)jsonFloat(buf, "st", scoreThem);
+        char by[16] = "";
+        jsonString(buf, "by", by, sizeof(by));
+        triggerGoalBanner(by);
     }
 }
 
@@ -693,6 +790,7 @@ void returnToMenu()
     prevPuckPX = -1;
     prevMalletPX = -1;
     prevTrajLen = 0;
+    goalBannerEndMs = 0;
     drawMenuUI();
 }
 
@@ -783,6 +881,7 @@ void loop()
     else
     {
         handleGameTouch();
+        serviceGoalBanner(); // expires the 3-second goal banner if it's done
     }
 
     checkSerialIncoming();
