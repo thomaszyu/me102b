@@ -1,3 +1,5 @@
+
+
 """
 Game controller: bridges the ESP32 display with the air hockey robot.
 
@@ -5,13 +7,25 @@ Waits for START GAME from the display, initializes motors + vision,
 runs the air hockey player loop, and streams state to the display.
 PAUSE holds mallet position. STOP kills motors and returns to menu.
 
+you must kill 33071 in arduino ide if you accidentaly use the serial monitor and have a terminal open in vscode
+
+Communicates with the ESP32 over USB UART.
+
 Usage:
-    python game_controller.py
+    python game_controller.py --serial /dev/cu.usbserial-XXXX
+    
+    testing: python display_code/laptop_listener.py --serial /dev/cu.usbserial-10
 """
 
+from vision import VisionSystem
+from home_motors import initialize_and_calibrate
+from ekf_controller import EKFController
+from air_hockey_player import play_air_hockey, _attack, DEFEND_X
+from laptop_listener import SerialLink, SERIAL_BAUD
 import asyncio
 import sys
 import os
+import argparse
 import numpy as np
 
 # Add paths
@@ -22,15 +36,6 @@ DISPLAY_DIR = os.path.join(SCRIPT_DIR, 'display_code')
 sys.path.insert(0, MOTOR_DIR)
 sys.path.insert(0, VISION_DIR)
 sys.path.insert(0, DISPLAY_DIR)
-
-from laptop_listener import DisplayLink
-from air_hockey_player import play_air_hockey, _attack, DEFEND_X
-from ekf_controller import EKFController
-from home_motors import initialize_and_calibrate
-from vision import VisionSystem
-
-
-UDP_PORT = 5005
 
 
 def make_display_callback(link):
@@ -55,7 +60,8 @@ def make_display_callback(link):
             traj = [(float(p[0]), float(p[1])) for p in _attack.traj_pos]
             if _attack.contact_pos is not None:
                 contact = np.array(_attack.contact_pos)
-                dists = [np.linalg.norm(np.array(p) - contact) for p in _attack.traj_pos]
+                dists = [np.linalg.norm(np.array(p) - contact)
+                         for p in _attack.traj_pos]
                 tc = int(np.argmin(dists))
 
         # Send state to display
@@ -75,9 +81,7 @@ def make_display_callback(link):
     return callback
 
 
-async def main():
-    link = DisplayLink(UDP_PORT)
-
+async def main(link):
     vis = None
     motors = None
     ctrl = None
@@ -125,5 +129,29 @@ async def main():
         print("[game] Done.")
 
 
+def _build_link():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--serial", metavar="PORT", required=True,
+        help="Serial port the ESP32 is connected to "
+             "(e.g. /dev/cu.usbserial-0001, /dev/ttyUSB0, COM5).",
+    )
+    parser.add_argument(
+        "--baud", type=int, default=SERIAL_BAUD,
+        help=f"Serial baud rate (default {SERIAL_BAUD}).",
+    )
+    args = parser.parse_args()
+
+    print(f"[game] Using UART link on {args.serial} @ {args.baud}")
+    return SerialLink(args.serial, args.baud)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    link = _build_link()
+    try:
+        asyncio.run(main(link))
+    finally:
+        try:
+            link.close()
+        except Exception:
+            pass

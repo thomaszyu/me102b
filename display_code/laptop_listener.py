@@ -1,138 +1,228 @@
 """
-UDP link between the laptop and ESP32 display.
+UART link between the laptop and the ESP32 display.
 
-- Receives difficulty selection from ESP32 when START is pressed
-- Sends game state (puck, mallet, strategy, score) to ESP32 for live table view
+Exposes a single transport, SerialLink, with this API:
+    wait_for_start(timeout=None) -> "easy" | "medium" | "hard" | None
+    check_command()              -> "pause" | "stop" | "start" | None
+    send_state(...)              -> push puck/mallet/strategy/score
+    send_score(score_us, score_them)
 
-Usage (standalone test):
-    python laptop_listener.py
+Usage (standalone simulator):
+    python laptop_listener.py --serial /dev/cu.usbserial-XXXX
 
 Integration with your robot code:
-    from display_code.laptop_listener import DisplayLink
+    from display_code.laptop_listener import SerialLink
 
-    link = DisplayLink()
-    difficulty = link.wait_for_start()   # blocks until START pressed
+    link = SerialLink("/dev/cu.usbserial-XXXX")
+    difficulty = link.wait_for_start()
 
-    # In your game loop:
     link.send_state(
         puck_x, puck_y, puck_vx, puck_vy, puck_valid,
         mallet_x, mallet_y, mallet_valid,
-        strategy="DEFEND", score_us=0, score_them=0
+        strategy="DEFEND", score_us=0, score_them=0,
     )
+
+Requires pyserial:  pip install pyserial
 """
 
-import socket
 import json
 import threading
 import time
 import math
+import queue
+
+try:
+    import serial as _pyserial  # pyserial
+except ImportError:
+    _pyserial = None
 
 
-UDP_PORT = 5005
+SERIAL_BAUD = 115200
 
 
-class DisplayLink:
-    """Two-way UDP link with the ESP32 display."""
+def _build_state_msg(puck_x=0, puck_y=0, puck_vx=0, puck_vy=0, puck_valid=False,
+                     mallet_x=0, mallet_y=0, mallet_valid=False,
+                     strategy="IDLE", score_us=0, score_them=0,
+                     trajectory=None, contact_idx=-1):
+    """Build the state JSON dict shared by all transports."""
+    msg = {
+        "type": "state",
+        "px": round(puck_x, 1),
+        "py": round(puck_y, 1),
+        "pvx": round(puck_vx, 1),
+        "pvy": round(puck_vy, 1),
+        "pv": 1 if puck_valid else 0,
+        "mx": round(mallet_x, 1),
+        "my": round(mallet_y, 1),
+        "mv": 1 if mallet_valid else 0,
+        "strategy": strategy,
+        "su": score_us,
+        "st": score_them,
+    }
 
-    def __init__(self, port=UDP_PORT):
+    if trajectory and len(trajectory) >= 2:
+        max_pts = 20
+        raw = trajectory
+        if len(raw) > max_pts:
+            step = len(raw) / max_pts
+            sampled = [raw[int(i * step)] for i in range(max_pts)]
+            if contact_idx >= 0:
+                contact_idx = int(contact_idx / step)
+        else:
+            sampled = raw
+        flat = []
+        for pt in sampled:
+            flat.append(round(float(pt[0]), 1))
+            flat.append(round(float(pt[1]), 1))
+        msg["traj"] = flat
+        msg["tc"] = contact_idx
+
+    return msg
+
+
+class SerialLink:
+    """Two-way UART link with the ESP32 display.
+
+    Newline-delimited JSON is exchanged over the same USB serial port the
+    Arduino IDE Serial Monitor uses; debug prints from the firmware are
+    printed locally with a "[esp32]" prefix and skipped by the parser.
+
+    Args:
+        port:   serial device path, e.g. "/dev/cu.usbserial-0001" (mac),
+                "/dev/ttyUSB0" (Linux), "COM5" (Windows).
+        baud:   must match SERIAL_BAUD on the ESP32 (default 115200).
+    """
+
+    def __init__(self, port, baud=SERIAL_BAUD):
+        if _pyserial is None:
+            raise ImportError(
+                "pyserial is not installed. Run: pip install pyserial"
+            )
         self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(("", self.port))
-        self.esp32_addr = None
-        self._lock = threading.Lock()
+        self.baud = baud
+        # Short read timeout so the reader thread polls frequently without
+        # busy-spinning when no data is available.
+        self.ser = _pyserial.Serial(port, baud, timeout=0.05)
+
+        self._inbox: "queue.Queue[dict]" = queue.Queue()
+        self._tx_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._reader = threading.Thread(
+            target=self._reader_loop, name="SerialLinkReader", daemon=True
+        )
+        self._reader.start()
+
+        # Most ESP32 dev boards reset when the USB serial port opens (DTR/RTS
+        # toggle). Give the firmware a moment to come up before we expect
+        # messages.
+        time.sleep(1.5)
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
+
+    def _reader_loop(self):
+        buf = bytearray()
+        while not self._stop.is_set():
+            try:
+                chunk = self.ser.read(512)
+            except Exception:
+                time.sleep(0.05)
+                continue
+            if not chunk:
+                continue
+            buf.extend(chunk)
+            while True:
+                nl = buf.find(b"\n")
+                if nl < 0:
+                    break
+                line = bytes(buf[:nl]).strip()
+                del buf[: nl + 1]
+                if not line:
+                    continue
+                if line.startswith(b"{"):
+                    try:
+                        msg = json.loads(line.decode("utf-8", "replace"))
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(msg, dict):
+                        self._inbox.put(msg)
+                else:
+                    # Firmware debug output — surface it but don't try to parse.
+                    try:
+                        print(f"[esp32] {line.decode('utf-8', 'replace')}")
+                    except Exception:
+                        pass
 
     def wait_for_start(self, timeout=None):
         """Block until the ESP32 sends a start command. Returns difficulty string."""
-        self.sock.settimeout(timeout)
+        deadline = None if timeout is None else time.time() + timeout
         while True:
             try:
-                data, addr = self.sock.recvfrom(1024)
-                msg = json.loads(data.decode())
-                self.esp32_addr = addr
-                if msg.get("type") == "start":
-                    diff = msg.get("difficulty", "medium")
-                    print(f"[display] Game start — difficulty={diff} (from {addr[0]})")
-                    return diff
-            except socket.timeout:
+                wait = None if deadline is None else max(
+                    0.0, deadline - time.time())
+                msg = self._inbox.get(timeout=wait)
+            except queue.Empty:
                 return None
+            if msg.get("type") == "start":
+                diff = msg.get("difficulty", "medium")
+                print(f"[display] Game start — difficulty={diff} (serial)")
+                return diff
 
     def check_command(self):
-        """Non-blocking check for commands from the ESP32 (pause/stop).
-        Returns 'pause', 'stop', or None."""
-        self.sock.setblocking(False)
+        """Non-blocking check for commands from the ESP32 (pause/stop/start).
+        Returns 'pause', 'stop', 'start', or None."""
         try:
-            data, addr = self.sock.recvfrom(1024)
-            self.esp32_addr = addr
-            msg = json.loads(data.decode())
-            return msg.get("type")  # "pause", "stop", "start", etc.
-        except BlockingIOError:
+            msg = self._inbox.get_nowait()
+        except queue.Empty:
             return None
-        finally:
-            self.sock.setblocking(True)
+        return msg.get("type")
 
     def send(self, msg_dict):
-        """Send a raw JSON message to the ESP32."""
-        if self.esp32_addr is None:
-            return
-        data = json.dumps(msg_dict, separators=(',', ':')).encode()
-        self.sock.sendto(data, self.esp32_addr)
+        """Send a raw JSON message to the ESP32 over UART."""
+        line = (json.dumps(msg_dict, separators=(",", ":")) + "\n").encode()
+        with self._tx_lock:
+            try:
+                self.ser.write(line)
+            except Exception:
+                pass
 
-    def send_state(self, puck_x=0, puck_y=0, puck_vx=0, puck_vy=0, puck_valid=False,
-                   mallet_x=0, mallet_y=0, mallet_valid=False,
-                   strategy="IDLE", score_us=0, score_them=0,
-                   trajectory=None, contact_idx=-1):
-        """Send current game state to the ESP32 display.
-
-        trajectory: list of (x, y) tuples for the attack path, or None.
-                    Will be downsampled to ~20 points to fit in one UDP packet.
-        contact_idx: index in the (downsampled) trajectory where contact occurs.
-        """
-        msg = {
-            "type": "state",
-            "px": round(puck_x, 1),
-            "py": round(puck_y, 1),
-            "pvx": round(puck_vx, 1),
-            "pvy": round(puck_vy, 1),
-            "pv": 1 if puck_valid else 0,
-            "mx": round(mallet_x, 1),
-            "my": round(mallet_y, 1),
-            "mv": 1 if mallet_valid else 0,
-            "strategy": strategy,
-            "su": score_us,
-            "st": score_them,
-        }
-
-        if trajectory and len(trajectory) >= 2:
-            max_pts = 20
-            raw = trajectory
-            if len(raw) > max_pts:
-                step = len(raw) / max_pts
-                sampled = [raw[int(i * step)] for i in range(max_pts)]
-                # Remap contact index to downsampled space
-                if contact_idx >= 0:
-                    contact_idx = int(contact_idx / step)
-            else:
-                sampled = raw
-            # Flatten to [x0,y0,x1,y1,...]
-            flat = []
-            for pt in sampled:
-                flat.append(round(float(pt[0]), 1))
-                flat.append(round(float(pt[1]), 1))
-            msg["traj"] = flat
-            msg["tc"] = contact_idx
-
-        self.send(msg)
+    def send_state(self, **kwargs):
+        """Send current game state to the ESP32 display. See _build_state_msg."""
+        self.send(_build_state_msg(**kwargs))
 
     def send_score(self, score_us, score_them):
         """Send just a score update."""
         self.send({"type": "score", "su": score_us, "st": score_them})
 
+    def close(self):
+        self._stop.set()
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+
 
 # --- Standalone test: puck physics simulation with mallet attacks ---
 if __name__ == "__main__":
     import random
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Air hockey display link tester (UART).",
+    )
+    parser.add_argument(
+        "--serial",
+        metavar="PORT",
+        required=True,
+        help="Serial port the ESP32 is connected to "
+             "(e.g. /dev/cu.usbserial-0001, /dev/ttyUSB0, COM5).",
+    )
+    parser.add_argument(
+        "--baud", type=int, default=SERIAL_BAUD,
+        help=f"Serial baud rate (default {SERIAL_BAUD}).",
+    )
+    args = parser.parse_args()
 
     # Table constants (matches air_hockey_player.py)
     TBL_X_MIN, TBL_X_MAX = -273.0, 273.0
@@ -152,8 +242,9 @@ if __name__ == "__main__":
     MALLET_DEFEND_SPEED = 600.0  # mm/s while defending
     MALLET_ATTACK_SPEED = 400.0  # mm/s while attacking (slow enough to see)
 
-    print(f"Listening for display commands on UDP port {UDP_PORT}...")
-    link = DisplayLink()
+    print(
+        f"Listening for display commands on serial {args.serial} @ {args.baud}...")
+    link = SerialLink(args.serial, args.baud)
 
     difficulty = link.wait_for_start()
     print(f">>> Game started with difficulty: {difficulty}")
@@ -252,9 +343,11 @@ if __name__ == "__main__":
 
             # Wall bounces
             if py <= WALL_Y_MIN:
-                py = WALL_Y_MIN; pvy = abs(pvy)
+                py = WALL_Y_MIN
+                pvy = abs(pvy)
             elif py >= WALL_Y_MAX:
-                py = WALL_Y_MAX; pvy = -abs(pvy)
+                py = WALL_Y_MAX
+                pvy = -abs(pvy)
 
             # Goals
             scored = False
@@ -264,14 +357,16 @@ if __name__ == "__main__":
                     print(f"  GOAL! Them: {score_us}-{score_them}")
                     scored = True
                 else:
-                    px = WALL_X_MIN; pvx = abs(pvx)
+                    px = WALL_X_MIN
+                    pvx = abs(pvx)
             elif px >= WALL_X_MAX:
                 if abs(py) < GOAL_HALF:
                     score_us += 1
                     print(f"  GOAL! Us: {score_us}-{score_them}")
                     scored = True
                 else:
-                    px = WALL_X_MAX; pvx = -abs(pvx)
+                    px = WALL_X_MAX
+                    pvx = -abs(pvx)
 
             if scored:
                 px, py, pvx, pvy = respawn_puck()
@@ -317,10 +412,12 @@ if __name__ == "__main__":
 
                 # Start attack if puck is slow-ish and in our half
                 if puck_in_our_half and speed < 350:
-                    attack_traj, attack_contact_idx = plan_attack(mallet[0], mallet[1], px, py)
+                    attack_traj, attack_contact_idx = plan_attack(
+                        mallet[0], mallet[1], px, py)
                     attack_tick = 0
                     strat = "WINDUP"
-                    print(f"  Attack! puck=({px:.0f},{py:.0f}) speed={speed:.0f}")
+                    print(
+                        f"  Attack! puck=({px:.0f},{py:.0f}) speed={speed:.0f}")
 
             # --- Send to display ---
             link.send_state(
