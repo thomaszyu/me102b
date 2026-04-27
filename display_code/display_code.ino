@@ -147,21 +147,18 @@ int trajContactIdx = -1; // index of the contact point, -1 if none
 float trajPrevPxX[MAX_TRAJ_PTS], trajPrevPxY[MAX_TRAJ_PTS];
 int prevTrajLen = 0;
 
-// Goal banner — when the laptop fires a {"type":"goal", ...} message we
-// pop a 3-second banner across the table area announcing who scored.
+// Goal banner for 3 secs
 #define GOAL_BANNER_MS 3000
 unsigned long goalBannerEndMs = 0;
 char goalBannerText[24] = "";
 uint16_t goalBannerColor = TFT_WHITE;
 
-// Winner banner — set on a {"type":"win",...} message. Stays up until the
-// user hits STOP / returns to menu (game is over).
+// Winner banner permanent, click return to menu when to erase from screen
 bool winnerActive = false;
 char winnerText[24] = "";
 uint16_t winnerColor = TFT_WHITE;
 
 // ===================== COORDINATE MAPPING =========
-
 int16_t mmToPxX(float x_mm)
 {
     float pad = 20.0f;
@@ -461,16 +458,7 @@ void updateGameView()
     drawAllDynamic();
 }
 
-// ===================== GOAL BANNER ================
-//
-// While goalBannerEndMs > 0 and millis() < goalBannerEndMs, we draw a
-// big banner across the middle of the table announcing who scored, and
-// suppress the per-tick puck/mallet redraw so it doesn't get covered.
-//
-// When the banner expires, we wipe the table area to black, repaint the
-// static lines, and reset the prev* dynamic-position trackers so the
-// next "state" message redraws everything cleanly.
-
+// goal banner
 void drawGoalBanner()
 {
     int16_t bw = TABLE_PX_W - 40;
@@ -543,11 +531,7 @@ void triggerGoalBanner(const char *who)
     }
 }
 
-// ===================== WINNER BANNER ==============
-//
-// Persistent (no expiration) banner shown once vision detects a winner.
-// Stays up until the user taps STOP and we returnToMenu().
-
+// winner banner
 void drawWinnerBanner()
 {
     int16_t bw = TABLE_PX_W - 30;
