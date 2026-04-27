@@ -107,10 +107,28 @@ class SerialLink:
         self._inbox: "queue.Queue[dict]" = queue.Queue()
         self._tx_lock = threading.Lock()
         self._stop = threading.Event()
+
+        # TX side runs on a dedicated thread so that game-loop callers never
+        # block on serial I/O. Two channels:
+        #   - _tx_queue: small FIFO for control messages (start/stop/pause/
+        #     score). Bounded with drop-oldest to bound memory.
+        #   - _latest_state / _state_event: single-slot buffer for "state"
+        #     messages. Producers overwrite; the writer always sends the
+        #     newest one. This naturally throttles state updates to whatever
+        #     the link can carry, without ever stalling the producer.
+        self._tx_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=16)
+        self._latest_state: "bytes | None" = None
+        self._state_lock = threading.Lock()
+        self._tx_event = threading.Event()
+
         self._reader = threading.Thread(
             target=self._reader_loop, name="SerialLinkReader", daemon=True
         )
+        self._writer = threading.Thread(
+            target=self._writer_loop, name="SerialLinkWriter", daemon=True
+        )
         self._reader.start()
+        self._writer.start()
 
         # Most ESP32 dev boards reset when the USB serial port opens (DTR/RTS
         # toggle). Give the firmware a moment to come up before we expect
@@ -178,17 +196,74 @@ class SerialLink:
             return None
         return msg.get("type")
 
-    def send(self, msg_dict):
-        """Send a raw JSON message to the ESP32 over UART."""
-        line = (json.dumps(msg_dict, separators=(",", ":")) + "\n").encode()
+    def _writer_loop(self):
+        """Background thread that performs all serial writes."""
+        while not self._stop.is_set():
+            # 1) Drain control messages first (start/stop/pause/score).
+            try:
+                line = self._tx_queue.get_nowait()
+                self._do_write(line)
+                continue
+            except queue.Empty:
+                pass
+
+            # 2) If a state update is pending, send the latest one.
+            with self._state_lock:
+                line = self._latest_state
+                self._latest_state = None
+            if line is not None:
+                self._do_write(line)
+                continue
+
+            # 3) Nothing to do — sleep until something is queued.
+            self._tx_event.wait(timeout=0.05)
+            self._tx_event.clear()
+
+    def _do_write(self, line: bytes):
+        """Write a single line to the serial port; tolerate disconnects."""
         with self._tx_lock:
             try:
                 self.ser.write(line)
             except Exception:
+                # Port may have been pulled / closed; ignore and let the
+                # next iteration retry or surface the error elsewhere.
                 pass
 
+    def send(self, msg_dict):
+        """Queue a JSON message for transmission. Non-blocking.
+
+        State messages overwrite each other (latest-only) so the producer is
+        never throttled by the serial link. Other messages go through a
+        bounded FIFO; if it fills, the oldest pending message is dropped to
+        make room.
+        """
+        line = (json.dumps(msg_dict, separators=(",", ":")) + "\n").encode()
+
+        if msg_dict.get("type") == "state":
+            with self._state_lock:
+                self._latest_state = line
+            self._tx_event.set()
+            return
+
+        try:
+            self._tx_queue.put_nowait(line)
+        except queue.Full:
+            try:
+                self._tx_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._tx_queue.put_nowait(line)
+            except queue.Full:
+                pass
+        self._tx_event.set()
+
     def send_state(self, **kwargs):
-        """Send current game state to the ESP32 display. See _build_state_msg."""
+        """Send current game state to the ESP32 display. See _build_state_msg.
+
+        Non-blocking. If the link can't keep up, intermediate state messages
+        are dropped and only the most recent one is delivered.
+        """
         self.send(_build_state_msg(**kwargs))
 
     def send_score(self, score_us, score_them):
@@ -197,6 +272,7 @@ class SerialLink:
 
     def close(self):
         self._stop.set()
+        self._tx_event.set()
         try:
             self.ser.close()
         except Exception:

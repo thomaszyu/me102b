@@ -1,5 +1,3 @@
-
-
 """
 Game controller: bridges the ESP32 display with the air hockey robot.
 
@@ -17,11 +15,6 @@ Usage:
     testing: python display_code/laptop_listener.py --serial /dev/cu.usbserial-10
 """
 
-from vision import VisionSystem
-from home_motors import initialize_and_calibrate
-from ekf_controller import EKFController
-from air_hockey_player import play_air_hockey, _attack, DEFEND_X
-from laptop_listener import SerialLink, SERIAL_BAUD
 import asyncio
 import sys
 import os
@@ -36,6 +29,12 @@ DISPLAY_DIR = os.path.join(SCRIPT_DIR, 'display_code')
 sys.path.insert(0, MOTOR_DIR)
 sys.path.insert(0, VISION_DIR)
 sys.path.insert(0, DISPLAY_DIR)
+
+from laptop_listener import SerialLink, SERIAL_BAUD
+from air_hockey_player import play_air_hockey, _attack, DEFEND_X
+from ekf_controller import EKFController
+from home_motors import initialize_and_calibrate
+from vision import VisionSystem
 
 
 def make_display_callback(link):
